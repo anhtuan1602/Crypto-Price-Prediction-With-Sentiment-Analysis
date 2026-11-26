@@ -88,3 +88,75 @@ def test_klines_to_frame():
     df = klines_to_frame(rows)
     assert list(df["close"]) == [100.5, 101.0]
     assert df.index[0] == pd.Timestamp("2025-12-20T10:00:00Z")
+
+
+class FakeJsonSession:
+    """Answers get_json from a function of (url, params)."""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def get_json(self, url, params=None, headers=None, return_errors=False):
+        self.calls.append((url, dict(params or {})))
+        return self.answer(url, params or {})
+
+
+def test_parse_current_cryptocompare_items():
+    from cryptosent.collectors.cryptocompare import parse_items
+
+    items = [{"TITLE": "BTC news", "URL": "https://c/2", "PUBLISHED_ON": 1766224800, "BODY": "text",
+              "SOURCE_DATA": {"NAME": "CoinDesk"}, "CATEGORY_DATA": [{"CATEGORY": "BTC"}]}]
+    arts = parse_items(items)
+    assert len(arts) == 1 and arts[0].publisher == "CoinDesk" and arts[0].extra["categories"] == "BTC"
+
+
+def test_cryptocompare_backfill_pages_back_with_data_api():
+    from datetime import datetime, timezone
+
+    from cryptosent.collectors.cryptocompare import DATA_API_URL, CryptoCompareCollector
+
+    day = 86_400
+    end = 1_766_224_800
+
+    def answer(url, params):
+        assert url == DATA_API_URL
+        top = params.get("to_ts", end)
+        return {"Data": [{"TITLE": f"BTC {t}", "URL": f"https://c/{t}", "PUBLISHED_ON": t}
+                         for t in range(top, top - 100 * 3600, -3600)], "Err": {}}
+
+    session = FakeJsonSession(answer)
+    arts = CryptoCompareCollector(session=session, api_key="k").backfill(
+        datetime.fromtimestamp(end - 10 * day, timezone.utc), datetime.fromtimestamp(end, timezone.utc), pause=0)
+    assert len(session.calls) == 3 and 240 <= len(arts) <= 243
+    assert min(a.published_at for a in arts).timestamp() >= end - 10 * day
+    assert all(c[1]["to_ts"] > end - 11 * day for c in session.calls)
+
+
+def test_cryptocompare_backfill_falls_back_to_legacy_and_reports_errors():
+    from datetime import datetime, timedelta, timezone
+
+    import pytest
+
+    from cryptosent.collectors.cryptocompare import NEWS_URL, CryptoCompareCollector, CryptoCompareError
+
+    end = datetime(2025, 12, 20, tzinfo=timezone.utc)
+
+    def legacy_only(url, params):
+        if url != NEWS_URL:
+            return {"Data": [], "Err": {"type": 1, "message": "API key is required"}}
+        if "lTs" in params and params["lTs"] < end.timestamp() - 3600:
+            return {"Response": "Success", "Data": []}
+        return {"Response": "Success", "Data": [{"title": "BTC", "url": "https://c/1",
+                                                  "published_on": int(end.timestamp()) - 60}]}
+
+    arts = CryptoCompareCollector(session=FakeJsonSession(legacy_only)).backfill(
+        end - timedelta(days=1), end, pause=0)
+    assert len(arts) == 1
+
+    def broken(url, params):
+        return {"Response": "Error", "Message": "You need a valid auth key", "Data": []}
+
+    with pytest.raises(CryptoCompareError, match="CRYPTOCOMPARE_API_KEY.*valid auth key"):
+        CryptoCompareCollector(session=FakeJsonSession(broken)).backfill(end - timedelta(days=1), end, pause=0)
+    assert CryptoCompareCollector(session=FakeJsonSession(broken)).crawl() == []

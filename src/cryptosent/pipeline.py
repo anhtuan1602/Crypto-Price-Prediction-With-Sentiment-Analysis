@@ -58,7 +58,9 @@ def backfill_news(settings: Settings, store: Store, days: int) -> int:
     collector = CryptoCompareCollector(session=session, api_key=settings.cryptocompare_api_key)
     start = datetime.now(timezone.utc) - timedelta(days=days)
     articles = collector.backfill(start)
-    return store.upsert_articles(articles)
+    stored = store.upsert_articles(articles)
+    log.info("backfill_news: %d articles fetched for %d days, %d new", len(articles), days, stored)
+    return stored
 
 
 def fetch_prices(settings: Settings, store: Store, backfill_days: int | None = None) -> int:

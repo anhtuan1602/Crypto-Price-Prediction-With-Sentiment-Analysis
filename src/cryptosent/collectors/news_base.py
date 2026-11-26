@@ -166,7 +166,10 @@ class PoliteSession:
         url: str,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        return_errors: bool = False,
     ) -> requests.Response | None:
+        """GET with retries on 429/5xx. A 4xx is not retried; it returns None
+        unless ``return_errors`` (the caller wants the API's error body)."""
         for attempt in range(1, self.retries + 1):
             proxy = random.choice(self.proxies) if self.proxies else None
             try:
@@ -180,8 +183,9 @@ class PoliteSession:
                 if resp.status_code == 429 or resp.status_code >= 500:
                     raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
                 if resp.status_code >= 400:
-                    log.warning("GET %s -> HTTP %s (not retrying)", url, resp.status_code)
-                    return None
+                    log.warning("GET %s -> HTTP %s (not retrying): %s", url, resp.status_code,
+                                " ".join(resp.text[:200].split()))
+                    return resp if return_errors else None
                 return resp
             except requests.RequestException as exc:
                 wait = self.backoff**attempt + random.uniform(0, 1)

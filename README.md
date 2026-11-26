@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 60 tests
+pytest                         # 63 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
@@ -42,7 +42,9 @@ docker compose up -d --build
 | Airflow | http://localhost:8080 (user and password from `.env`) |
 | MLflow | http://localhost:5000 |
 
-Then, once, trigger the **`backfill_history`** DAG in Airflow (default 90 days).
+Put a free CryptoCompare / CoinDesk Data API key in `CRYPTOCOMPARE_API_KEY`
+first: the news API needs one for history. Then, once, trigger the
+**`backfill_history`** DAG in Airflow (default 90 days).
 It loads 1-minute Binance candles and historical CryptoCompare news, then
 scores them. After that the scheduled DAGs keep everything current:
 
