@@ -14,7 +14,7 @@ from .collectors import BinancePriceCollector, CryptoCompareCollector, PoliteSes
 from .config import Settings
 from .features import TARGET, build_dataset
 from .models.train import ExperimentConfig, fit_final, log_mlflow, run_experiment, save_outputs
-from .sentiment import build_agent, enrich_document
+from .sentiment import build_agent, enrich_documents
 from .storage import Store
 
 log = logging.getLogger(__name__)
@@ -76,30 +76,63 @@ def fetch_prices(settings: Settings, store: Store, backfill_days: int | None = N
 
 # -- enrichment -----------------------------------------------------------
 def enrich_pending(settings: Settings, store: Store, limit: int = 200, agent=None,
-                   min_age_minutes: int = 0) -> int:
+                   min_age_minutes: int = 0, backend: str | None = None) -> int:
     """Score articles that have no sentiment yet (used when Kafka is off, and
-    as a catch-up job for anything the consumer missed). ``min_age_minutes``
-    skips freshly crawled articles the Kafka consumer is still handling."""
+    as a catch-up job for anything the consumer missed).
+
+    ``min_age_minutes`` skips freshly crawled articles the Kafka consumer is
+    still handling. ``backend`` overrides SENTIMENT_BACKEND for this run (for
+    example ``lexicon`` for a large backfill on the Gemini free tier). If the
+    backend reports a configuration problem or an exhausted daily quota, the
+    run stops with one log line and the rest stay unscored for the next run."""
     from .collectors.news_base import to_utc
 
-    agent = agent or build_agent(settings)
+    agent = agent or build_agent(settings, backend)
+    chunk = max(1, getattr(agent, "batch_size", 50))
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)
     done = 0
-    while True:
+    while done < limit:
         docs = store.articles_missing_sentiment(limit=min(limit - done, 100))
         if min_age_minutes:
             docs = [d for d in docs if d.get("fetched_at") is None or to_utc(d["fetched_at"]) <= cutoff]
         if not docs:
             break
-        items = []
-        for doc in docs:
-            sentiment, nlp = enrich_document(agent, doc)
-            items.append((doc["_id"], sentiment, nlp))
-        store.set_enrichment_many(items)
-        done += len(items)
-        if done >= limit:
+        stop = None
+        for i in range(0, len(docs), chunk):
+            items, stop = enrich_documents(agent, docs[i:i + chunk])
+            if items:
+                store.set_enrichment_many(items)
+                done += len(items)
+            if stop is not None:
+                break
+        if stop is not None:
+            log.error("Stopped scoring after %d articles: %s", done, stop)
+            if stop.kind != "quota" and (backend or settings.sentiment_backend) == "gemini":
+                raise stop
             break
     log.info("enrich_pending: scored %d articles with %s", done, agent.backend)
+    return done
+
+
+def rescore(settings: Settings, store: Store, from_backend: str = "lexicon", limit: int = 500) -> int:
+    """Re-score articles that an earlier run scored with ``from_backend`` (for
+    example after a Gemini outage, or gradually upgrading a lexicon backfill
+    within the free-tier quota). Newest articles first."""
+    agent = build_agent(settings)
+    if agent.backend == from_backend:
+        raise ValueError(f"The active backend is {agent.backend}; configure a different one to rescore")
+    docs = store.articles_scored_by(from_backend, limit)
+    done = 0
+    chunk = max(1, getattr(agent, "batch_size", 50))
+    for i in range(0, len(docs), chunk):
+        items, stop = enrich_documents(agent, docs[i:i + chunk])
+        items = [it for it in items if it[1].get("backend") != from_backend]  # skip batch fallbacks
+        if items:
+            store.set_enrichment_many(items)  # overwrites; old scores stay until replaced
+            done += len(items)
+        if stop is not None:
+            log.error("Stopped rescoring after %d articles: %s", done, stop)
+            break
     return done
 
 

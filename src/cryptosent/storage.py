@@ -31,6 +31,8 @@ class Store(Protocol):
     def upsert_articles(self, articles: Iterable[Article]) -> int: ...
     def articles_missing_sentiment(self, limit: int = 100) -> list[dict[str, Any]]: ...
     def set_enrichment(self, article_id: str, sentiment: dict[str, Any], nlp: dict[str, Any]) -> None: ...
+    def set_enrichment_many(self, items: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> None: ...
+    def articles_scored_by(self, backend: str, limit: int) -> list[dict[str, Any]]: ...
     def get_articles(self, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame: ...
     def upsert_prices(self, df: pd.DataFrame) -> int: ...
     def get_prices(self, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame: ...
@@ -129,6 +131,11 @@ class LocalStore:
                 data[article_id]["nlp"] = nlp
         self._dump(self._articles_path, data)
 
+    def articles_scored_by(self, backend: str, limit: int) -> list[dict[str, Any]]:
+        docs = [d for d in self._articles().values() if (d.get("sentiment") or {}).get("backend") == backend]
+        docs.sort(key=lambda d: d["published_at"], reverse=True)
+        return docs[:limit]
+
     def get_articles(self, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
         df = articles_frame(list(self._articles().values()))
         if df.empty:
@@ -215,6 +222,9 @@ class MongoStore:
     def set_enrichment_many(self, items: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> None:
         for article_id, sentiment, nlp in items:
             self.set_enrichment(article_id, sentiment, nlp)
+
+    def articles_scored_by(self, backend: str, limit: int) -> list[dict[str, Any]]:
+        return list(self.db.articles.find({"sentiment.backend": backend}).sort("published_at", -1).limit(limit))
 
     def get_articles(self, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
         query: dict[str, Any] = {}

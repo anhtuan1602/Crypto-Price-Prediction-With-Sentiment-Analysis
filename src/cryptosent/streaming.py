@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import signal
+import time
 from typing import Any, Iterable
 
 from .collectors.news_base import Article
@@ -61,7 +62,7 @@ def run_sentiment_consumer(settings, store, agent=None) -> None:
 
     Offsets are committed only after the MongoDB write, so a crash replays the
     batch instead of losing it; re-scoring is idempotent (same ``_id``)."""
-    from .sentiment import build_agent, enrich_document
+    from .sentiment import build_agent, enrich_documents
 
     agent = agent or build_agent(settings)
     consumer = make_consumer(settings.kafka_bootstrap, settings.topic_raw, "sentiment-consumer")
@@ -75,16 +76,32 @@ def run_sentiment_consumer(settings, store, agent=None) -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     log.info("Sentiment consumer listening on %s (backend=%s)", settings.topic_raw, agent.backend)
+    paused_until: float | None = None  # monotonic time; inf = until restart
     while running:
         batch = consumer.poll(timeout_ms=2000)
-        for records in batch.values():
-            for rec in records:
-                doc = rec.value
-                store.upsert_articles([Article.from_doc(doc)])
-                sentiment, nlp = enrich_document(agent, doc)
-                store.set_enrichment(doc["_id"], sentiment, nlp)
-                producer.send(settings.topic_scored, key=doc["_id"], value={**doc, "sentiment": sentiment, "nlp": nlp})
-        if batch:
+        docs = [rec.value for records in batch.values() for rec in records]
+        if paused_until is not None and time.monotonic() >= paused_until:
+            paused_until = None
+            if hasattr(agent, "disabled"):
+                agent.disabled = None
+            log.info("Resuming sentiment scoring")
+        if docs:
+            store.upsert_articles([Article.from_doc(d) for d in docs])
+            if paused_until is None:
+                items, halt = enrich_documents(agent, docs)
+                if items:
+                    store.set_enrichment_many(items)
+                    by_id = {d["_id"]: d for d in docs}
+                    for article_id, sentiment, nlp in items:
+                        producer.send(settings.topic_scored, key=article_id,
+                                      value={**by_id[article_id], "sentiment": sentiment, "nlp": nlp})
+                if halt is not None:
+                    # One clear line. Articles are still stored, unscored; the hourly
+                    # sentiment_catchup DAG scores them once the problem is gone.
+                    # Quota pauses retry after an hour, config errors need a restart.
+                    paused_until = time.monotonic() + 3600 if halt.kind == "quota" else float("inf")
+                    log.error("Sentiment scoring paused (%s), articles are stored unscored: %s",
+                              "retrying in 1 hour" if halt.kind == "quota" else "fix .env and restart", halt)
             producer.flush()
             consumer.commit()
     consumer.close()
