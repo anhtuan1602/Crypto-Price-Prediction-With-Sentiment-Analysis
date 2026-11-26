@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from .sentiment import LexiconSentimentAgent, build_agent, enrich_documents
 from .storage import Store
 
 log = logging.getLogger(__name__)
+PROGRESS_EVERY = 50  # articles between progress log lines
 
 
 # -- collection -----------------------------------------------------------
@@ -91,6 +93,9 @@ def enrich_pending(settings: Settings, store: Store, limit: int = 200, agent=Non
     mode = (backend or settings.sentiment_backend or "auto").lower()
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)
     done = 0
+    started = time.monotonic()
+    next_report = PROGRESS_EVERY
+    log.info("enrich_pending: scoring up to %d articles with %s", limit, agent.backend)
     while done < limit:
         docs = store.articles_missing_sentiment(limit=min(limit - done, 100))
         if min_age_minutes:
@@ -104,6 +109,11 @@ def enrich_pending(settings: Settings, store: Store, limit: int = 200, agent=Non
             if items:
                 store.set_enrichment_many(items)
                 done += len(items)
+            if done >= next_report:
+                rate = done / max(time.monotonic() - started, 1e-6)
+                log.info("enrich_pending: %d/%d articles scored (%.1f/s, backend=%s)",
+                         done, limit, rate, agent.backend)
+                next_report = done + PROGRESS_EVERY
             if stop is not None:
                 break
         if stop is None:
@@ -118,7 +128,7 @@ def enrich_pending(settings: Settings, store: Store, limit: int = 200, agent=Non
         if stop.kind != "quota" and mode == "gemini":
             raise stop
         break
-    log.info("enrich_pending: scored %d articles with %s", done, agent.backend)
+    log.info("enrich_pending: scored %d articles with %s in %.0fs", done, agent.backend, time.monotonic() - started)
     return done
 
 

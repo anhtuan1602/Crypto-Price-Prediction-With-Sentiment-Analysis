@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 58 tests
+pytest                         # 60 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
