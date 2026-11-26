@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 54 tests
+pytest                         # 58 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
@@ -62,8 +62,10 @@ scores them. After that the scheduled DAGs keep everything current:
   article is scored twice.
 * If a model answers 404, the client switches to `gemini-flash-latest`, then
   to other Flash models your key lists, trying at most 3 models.
-* A rejected key or an unknown model gives **one** clear error, not a retry
-  storm. In `auto` mode the run then falls back to the offline lexicon.
+* A 400 is retried once with a minimal request. A rejected key, an unknown
+  model or a request that still fails gives **one** clear error, not a retry
+  storm. In `auto` mode the rest of the run then uses the offline lexicon
+  (upgrade later with `cryptosent rescore`).
 * When the daily quota runs out, scoring stops and the remaining articles
   wait for the next run. The API key goes in a request header and is
   redacted from logs.

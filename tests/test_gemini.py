@@ -240,3 +240,43 @@ def test_rescore_upgrades_lexicon_scores(tmp_path, monkeypatch):
     assert rescore(settings, store, "lexicon", limit=50) == 5
     backends = set(store.get_articles()["sentiment_backend"])
     assert backends == {"gemini"}
+
+
+def test_400_retries_once_with_minimal_request():
+    s = FakeSession(posts=[err(400, "Invalid JSON payload received. Unknown name \"topK\"", "INVALID_ARGUMENT"),
+                           ok({"label": "bullish", "score": 0.2, "confidence": 0.6, "reasoning": "x"})])
+    assert make_agent(s).score("t").label == "bullish"
+    first, second = s.calls[0][2]["generationConfig"], s.calls[1][2]["generationConfig"]
+    assert "topK" in first and "responseSchema" in first
+    assert set(second) == {"temperature", "responseMimeType"}
+
+
+def test_repeated_400_fails_fast_after_two_calls():
+    bad = err(400, "Request contains an invalid argument.", "INVALID_ARGUMENT")
+    s = FakeSession(posts=[bad, bad])
+    agent = make_agent(s)
+    with pytest.raises(GeminiConfigError) as exc:
+        agent.score("t")
+    assert exc.value.kind == "config" and len(s.calls) == 2
+
+
+def test_invalid_key_400_is_not_retried():
+    s = FakeSession(posts=[err(400, "API key not valid. Please pass a valid API key.", "INVALID_ARGUMENT")])
+    with pytest.raises(GeminiConfigError) as exc:
+        make_agent(s).score("t")
+    assert exc.value.kind == "auth" and len(s.calls) == 1
+
+
+def test_enrich_pending_auto_switches_to_lexicon_on_bad_request(tmp_path, caplog):
+    store = _store_with_articles(tmp_path, 25)
+    bad = err(400, "Request contains an invalid argument.", "INVALID_ARGUMENT")
+    s = FakeSession(posts=[bad, bad])
+    agent = make_agent(s, batch_size=10)
+    settings = Settings(data_dir=tmp_path, gemini_api_key=KEY, sentiment_backend="auto")
+    with caplog.at_level(logging.WARNING):
+        done = enrich_pending(settings, store, limit=100, agent=agent)
+    assert done == 25 and not store.articles_missing_sentiment(100)
+    assert set(store.get_articles()["sentiment_backend"]) == {"lexicon"}
+    assert len(s.calls) == 2  # one minimal retry, then no more Gemini calls
+    assert len([r for r in caplog.records if r.levelno >= logging.ERROR]) == 1
+    assert KEY not in caplog.text

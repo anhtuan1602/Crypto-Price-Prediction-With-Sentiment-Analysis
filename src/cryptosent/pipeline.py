@@ -14,7 +14,7 @@ from .collectors import BinancePriceCollector, CryptoCompareCollector, PoliteSes
 from .config import Settings
 from .features import TARGET, build_dataset
 from .models.train import ExperimentConfig, fit_final, log_mlflow, run_experiment, save_outputs
-from .sentiment import build_agent, enrich_documents
+from .sentiment import LexiconSentimentAgent, build_agent, enrich_documents
 from .storage import Store
 
 log = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def enrich_pending(settings: Settings, store: Store, limit: int = 200, agent=Non
     from .collectors.news_base import to_utc
 
     agent = agent or build_agent(settings, backend)
-    chunk = max(1, getattr(agent, "batch_size", 50))
+    mode = (backend or settings.sentiment_backend or "auto").lower()
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)
     done = 0
     while done < limit:
@@ -98,6 +98,7 @@ def enrich_pending(settings: Settings, store: Store, limit: int = 200, agent=Non
         if not docs:
             break
         stop = None
+        chunk = max(1, getattr(agent, "batch_size", 50))
         for i in range(0, len(docs), chunk):
             items, stop = enrich_documents(agent, docs[i:i + chunk])
             if items:
@@ -105,11 +106,18 @@ def enrich_pending(settings: Settings, store: Store, limit: int = 200, agent=Non
                 done += len(items)
             if stop is not None:
                 break
-        if stop is not None:
-            log.error("Stopped scoring after %d articles: %s", done, stop)
-            if stop.kind != "quota" and (backend or settings.sentiment_backend) == "gemini":
-                raise stop
-            break
+        if stop is None:
+            continue
+        if stop.kind != "quota" and mode == "auto":
+            # broken setup (bad request, key, model): one clear line, then finish
+            # the run offline; `cryptosent rescore` upgrades these later
+            log.error("Gemini is not usable (%s); scoring the rest of this run with the lexicon backend", stop)
+            agent = LexiconSentimentAgent()
+            continue
+        log.error("Stopped scoring after %d articles: %s", done, stop)
+        if stop.kind != "quota" and mode == "gemini":
+            raise stop
+        break
     log.info("enrich_pending: scored %d articles with %s", done, agent.backend)
     return done
 

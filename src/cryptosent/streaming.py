@@ -95,6 +95,15 @@ def run_sentiment_consumer(settings, store, agent=None) -> None:
                     for article_id, sentiment, nlp in items:
                         producer.send(settings.topic_scored, key=article_id,
                                       value={**by_id[article_id], "sentiment": sentiment, "nlp": nlp})
+                if halt is not None and halt.kind != "quota" and (settings.sentiment_backend or "auto") == "auto":
+                    from .sentiment import LexiconSentimentAgent
+
+                    log.error("Gemini is not usable (%s); scoring with the lexicon backend until restart", halt)
+                    agent = LexiconSentimentAgent()
+                    items2, _ = enrich_documents(agent, [d for d in docs if d["_id"] not in {i[0] for i in items}])
+                    if items2:
+                        store.set_enrichment_many(items2)
+                    halt = None
                 if halt is not None:
                     # One clear line. Articles are still stored, unscored; the hourly
                     # sentiment_catchup DAG scores them once the problem is gone.
