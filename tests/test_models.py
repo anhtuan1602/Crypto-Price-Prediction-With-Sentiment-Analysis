@@ -73,3 +73,49 @@ def test_predict_latest_writes_predictions(tmp_path):
     assert rows and all(r["signal"] in ("long", "short", "flat") for r in rows)
     assert rows[-1]["actual_pct"] is None  # future not known yet
     assert len(store.get_predictions()) >= len(rows)
+
+
+def _live_store(tmp_path, days, live_from_day):
+    """Demo prices + news where only articles from ``live_from_day`` on look
+    live-crawled (source rss, fetched_at at their publication time)."""
+    from datetime import timedelta
+
+    from cryptosent.demo import DemoConfig, generate
+    from cryptosent.pipeline import enrich_pending
+    from cryptosent.sentiment.lexicon import LexiconSentimentAgent
+
+    settings = Settings(data_dir=tmp_path / "data", artifacts_dir=tmp_path / "artifacts", mongo_uri=None,
+                        news_sources=["coinmarketcap", "rss"])
+    store = LocalStore(settings.data_dir)
+    candles, articles, _ = generate(DemoConfig(days=days, seed=1))
+    t0 = candles.index.min().to_pydatetime()
+    live_from = t0 + timedelta(days=live_from_day)
+    for a in articles:
+        a.source = "rss" if a.published_at >= live_from else "gdelt"
+        a.fetched_at = max(a.published_at, live_from) + timedelta(minutes=5)
+    store.upsert_prices(candles)
+    store.upsert_articles(articles)
+    enrich_pending(settings, store, limit=10**9, agent=LexiconSentimentAgent())
+    return settings, store, live_from
+
+
+def test_training_uses_only_the_live_news_period(tmp_path):
+    from cryptosent.pipeline import train, training_start
+
+    settings, store, live_from = _live_store(tmp_path, days=8, live_from_day=3)
+    start = training_start(settings, store)
+    assert abs((start - live_from).total_seconds()) <= 600
+    report = train(settings, store, models=["ridge"])
+    assert report["samples"]["total"] <= 5 * 144 and report["samples"]["total"] >= 4 * 144
+    settings.train_start = "all"
+    assert training_start(settings, store) is None
+
+
+def test_training_skips_cleanly_with_too_little_live_data(tmp_path):
+    import pytest
+
+    from cryptosent.pipeline import NotEnoughData, train
+
+    settings, store, _ = _live_store(tmp_path, days=4, live_from_day=3)
+    with pytest.raises(NotEnoughData, match="hours of live collection"):
+        train(settings, store, models=["ridge"])

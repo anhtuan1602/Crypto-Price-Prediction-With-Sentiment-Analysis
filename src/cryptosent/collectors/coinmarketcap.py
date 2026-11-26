@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from bs4 import BeautifulSoup
 
-from .news_base import Article, PoliteSession, clean_text, dedupe, to_utc
+from .news_base import Article, PoliteSession, clean_text, dedupe, parse_article_body, to_utc  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -86,18 +86,6 @@ def parse_next_data(html_text: str) -> list[Article]:
 
     walk(payload)
     return dedupe(found)
-
-
-def parse_article_body(html_text: str) -> str:
-    """Isolate the article body (report: ``<div class="article-content">``)."""
-    soup = BeautifulSoup(html_text, "html.parser")
-    for selector in ("div.article-content", "article", "div.post-content", "main"):
-        node = soup.select_one(selector)
-        if node is not None:
-            text = clean_text(str(node))
-            if len(text) > 200:
-                return text
-    return ""
 
 
 class CoinMarketCapCrawler:

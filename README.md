@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 67 tests
+pytest                         # 70 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
@@ -42,9 +42,15 @@ docker compose up -d --build
 | Airflow | http://localhost:8080 (user and password from `.env`) |
 | MLflow | http://localhost:5000 |
 
-Then, once, trigger the **`backfill_history`** DAG in Airflow (default 90 days).
-It loads 1-minute Binance candles and historical news from GDELT (see below), then
-scores them. After that the scheduled DAGs keep everything current:
+Then, once, trigger the **`backfill_history`** DAG in Airflow. By default it
+loads 90 days of 1-minute Binance candles only. News comes from live
+collection, as in the original report: from the moment the stack is up,
+`cmc_news_10m` crawls full articles every 10 minutes and Gemini scores them.
+`train_daily` trains only on the period since the first live crawl
+(`TRAIN_START=auto`). It skips with a log line until there are 200 samples
+(about 33 hours). Five days give about 700 samples.
+
+The scheduled DAGs keep everything current:
 
 | DAG | Schedule | What it does |
 |---|---|---|
@@ -52,12 +58,27 @@ scores them. After that the scheduled DAGs keep everything current:
 | `btc_prices_5m` | every 5 min | sync Binance 1m candles |
 | `predict_10m` | every 10 min | predict the next window with the latest model |
 | `sentiment_catchup_1h` | hourly | score anything the Kafka consumer missed, upgrade some lexicon scores to Gemini |
-| `train_daily` | 02:00 UTC | backfill 2 days of news, retrain on the last 180 days, log to MLflow |
-| `backfill_history` | manual | initial history load |
+| `train_daily` | 02:00 UTC | score leftovers, retrain on the live-news period, log to MLflow (also trigger it by hand) |
+| `backfill_history` | manual | price history; historical news only if `news_days` > 0 |
 
-### Historical news (backfill)
+### Live news sources (no keys)
 
-* **GDELT** (default, free, no key) searches news from about the **last 3
+* **CoinMarketCap**: the site's news content endpoint, with an HTML fallback.
+* **RSS** from 13 crypto outlets: CoinDesk, Cointelegraph, Decrypt, Bitcoin
+  Magazine, The Block, Bitcoinist, NewsBTC, CryptoSlate, CryptoPotato,
+  Bitcoin.com, U.Today, Cryptonews and BeInCrypto.
+* When a feed has only a teaser, the article page is downloaded **once** for
+  each new article and the main text is extracted (`FETCH_FULL_TEXT=true`,
+  at most 60 pages per run). A broken feed or a blocked page is skipped.
+* Expect roughly 300 to 600 BTC and crypto articles a day. This is an
+  estimate; the `crawl_news` log line shows the real counts per source.
+
+### Historical news (optional backfill)
+
+Off by default. Set `news_days` on `backfill_history` to use it. It mixes
+headline-only articles into training, so the default keeps to live full text.
+
+* **GDELT** (free, no key) searches news from about the **last 3
   months** only. It returns headlines and links but no article text, so
   those articles are scored on the title. Its timestamp is when GDELT first
   saw the article, usually 15 to 60 minutes after publication. That delay
@@ -88,7 +109,13 @@ scores them. After that the scheduled DAGs keep everything current:
 * When the daily quota runs out, scoring stops and the remaining articles
   wait for the next run. The API key goes in a request header and is
   redacted from logs.
-* A 90-day backfill is tens of thousands of articles, too many for a free
+* **Live volume vs quota.** New articles arrive a few at a time every 10
+  minutes, so the scorer sends at most about one request per crawl: 150 to
+  250 requests a day for 300 to 600 articles, plus 5 an hour for upgrading
+  lexicon scores. Check your model's requests-per-day limit in Google AI
+  Studio (Settings, Rate limits). Flash-Lite free tiers have allowed far more
+  than this. If the quota runs out, scoring pauses and catches up later.
+* A 90-day historical backfill is tens of thousands of articles, too many for a free
   daily quota. Trigger `backfill_history` with `sentiment_backend=lexicon`.
   The hourly `sentiment_catchup_1h` job then upgrades
   `GEMINI_RESCORE_PER_HOUR` of those articles to Gemini, newest first.

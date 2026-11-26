@@ -266,3 +266,26 @@ def test_backfill_news_uses_gdelt_without_key_and_survives_one_failing_source(tm
 
     monkeypatch.setattr(CryptoCompareCollector, "backfill", fail)
     assert backfill_news(s, LocalStore(tmp_path), days=3) == 1
+
+
+def test_fetch_full_text_replaces_teasers_once():
+    from datetime import datetime, timezone
+
+    from cryptosent.collectors.news_base import Article, fetch_full_text
+
+    page = "<html><nav>menu</nav><div class='entry-content'>" + "<p>Bitcoin rose sharply today.</p>" * 30 + \
+           "</div><footer>footer</footer></html>"
+
+    class Session:
+        calls = 0
+
+        def get(self, url, **kw):
+            Session.calls += 1
+            return type("R", (), {"text": page})()
+
+    t = datetime(2026, 11, 26, tzinfo=timezone.utc)
+    teaser = Article("https://n/1", "Bitcoin rises", t, "rss", body="short teaser")
+    full = Article("https://n/2", "Bitcoin rises", t, "rss", body="x " * 400)
+    assert fetch_full_text(Session(), [teaser, full]) == 1
+    assert teaser.body.startswith("Bitcoin rose sharply") and "menu" not in teaser.body and "footer" not in teaser.body
+    assert teaser.extra["full_text"] is True and Session.calls == 1

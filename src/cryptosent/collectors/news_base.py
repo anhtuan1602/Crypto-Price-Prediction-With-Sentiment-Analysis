@@ -121,6 +121,51 @@ def clean_text(raw: str | None) -> str:
     return _WS.sub(" ", text).strip()
 
 
+BODY_SELECTORS = (
+    "div.article-content", "[itemprop=articleBody]", "div.entry-content", "div.post-content",
+    "div.article-body", "div.article__body", "div.content-inner", "article", "main",
+)
+
+
+def parse_article_body(html_text: str, min_len: int = 200) -> str:
+    """Isolate the main text of an article page (report: ``div.article-content``,
+    plus the usual WordPress / news-site containers). Returns "" if nothing
+    article-sized is found."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    for tag in soup(["nav", "header", "footer", "aside", "form"]):
+        tag.decompose()
+    for selector in BODY_SELECTORS:
+        node = soup.select_one(selector)
+        if node is None:
+            continue
+        paragraphs = [p.get_text(" ") for p in node.find_all("p")]
+        text = clean_text(" ".join(paragraphs)) if paragraphs else clean_text(str(node))
+        if len(text) >= min_len:
+            return text
+    return ""
+
+
+def fetch_full_text(session: "PoliteSession", articles: list[Article], min_len: int = 400,
+                    max_fetch: int = 60) -> int:
+    """Replace teaser bodies with the full article text, at most ``max_fetch``
+    page downloads. Called only for new articles, so a page is fetched once."""
+    fetched = 0
+    for art in articles:
+        if fetched >= max_fetch:
+            break
+        if len(art.body) >= min_len:
+            continue
+        fetched += 1
+        resp = session.get(art.url)
+        if resp is None:
+            continue
+        body = parse_article_body(resp.text)
+        if len(body) > len(art.body):
+            art.body = body
+            art.extra = {**(art.extra or {}), "full_text": True}
+    return fetched
+
+
 def dedupe(articles: Iterable[Article]) -> list[Article]:
     seen: set[str] = set()
     out = []

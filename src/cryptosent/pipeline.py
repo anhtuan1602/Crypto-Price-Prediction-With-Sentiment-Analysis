@@ -11,7 +11,14 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from .collectors import BinancePriceCollector, build_backfill_collectors, build_news_collectors, dedupe
+from .collectors import (
+    BinancePriceCollector,
+    PoliteSession,
+    build_backfill_collectors,
+    build_news_collectors,
+    dedupe,
+    fetch_full_text,
+)
 from .config import Settings
 from .features import TARGET, build_dataset
 from .models.train import ExperimentConfig, fit_final, log_mlflow, run_experiment, save_outputs
@@ -37,11 +44,16 @@ def crawl_news(settings: Settings, store: Store, publish: bool = True) -> dict[s
         stats[collector.name] = len(batch)
         articles.extend(batch)
     articles = dedupe(articles)
-    known = set()
+    known: set[str] = set()
+    ids = [a.article_id for a in articles]
     if hasattr(store, "db"):
-        ids = [a.article_id for a in articles]
         known = {d["_id"] for d in store.db.articles.find({"_id": {"$in": ids}}, {"_id": 1})}
+    elif hasattr(store, "_articles"):
+        known = set(ids) & set(store._articles())
     new_articles = [a for a in articles if a.article_id not in known]
+    if settings.fetch_full_text and new_articles:
+        session = PoliteSession(proxies=settings.http_proxies, timeout=min(settings.request_timeout, 15), retries=1)
+        stats["full_text_fetched"] = fetch_full_text(session, new_articles)
     stats["new"] = store.upsert_articles(new_articles)
     if publish and settings.kafka_bootstrap and new_articles:
         from .streaming import make_producer, publish_articles
@@ -173,21 +185,70 @@ def rescore(settings: Settings, store: Store, from_backend: str = "lexicon", lim
 
 
 # -- modelling ------------------------------------------------------------
-def load_dataset(settings: Settings, store: Store, days: int | None = None, include_unlabelled: bool = False):
+def live_news_start(settings: Settings, store: Store) -> datetime | None:
+    """When live news collection began: the earliest ``fetched_at`` of an
+    article from a live source (NEWS_SOURCES). None if there is none."""
+    articles = store.get_articles()
+    if articles.empty or "fetched_at" not in articles:
+        return None
+    live = articles[articles["source"].isin(settings.news_sources)]["fetched_at"].dropna()
+    if live.empty:
+        return None
+    return pd.Timestamp(live.min()).to_pydatetime()
+
+
+def training_start(settings: Settings, store: Store, days: int | None = None) -> datetime | None:
     start = datetime.now(timezone.utc) - timedelta(days=days) if days else None
-    candles = store.get_prices(start=start)
-    articles_start = None if start is None else start - timedelta(hours=7)
-    articles = store.get_articles(start=articles_start)
-    return build_dataset(
+    mode = (settings.train_start or "auto").strip().lower()
+    if mode == "all":
+        return start
+    if mode == "auto":
+        floor = live_news_start(settings, store)
+    else:
+        ts = pd.Timestamp(settings.train_start)
+        floor = (ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")).to_pydatetime()
+    if floor is None:
+        return start
+    return floor if start is None else max(start, floor)
+
+
+def load_dataset(settings: Settings, store: Store, days: int | None = None, include_unlabelled: bool = False,
+                 start: datetime | None = None):
+    """Leakage-safe modelling table. Rows start at ``start`` (or ``days`` ago);
+    prices and news are loaded a few hours earlier for indicator warm-up and
+    the observation window."""
+    if start is None and days:
+        start = datetime.now(timezone.utc) - timedelta(days=days)
+    candles = store.get_prices(start=None if start is None else start - timedelta(hours=3))
+    articles = store.get_articles(start=None if start is None else start - timedelta(hours=7))
+    ds = build_dataset(
         candles, articles, settings.windows,
         flat_threshold_pct=settings.target_flat_threshold,
         include_unlabelled=include_unlabelled,
     )
+    if start is not None and not ds.frame.empty:
+        ds.frame = ds.frame[ds.frame.index >= pd.Timestamp(start)]
+    return ds
+
+
+MIN_TRAIN_SAMPLES = 200  # about 33 hours of 10-minute decision times
+
+
+class NotEnoughData(ValueError):
+    pass
 
 
 def train(settings: Settings, store: Store, days: int | None = None, models: list[str] | None = None) -> dict[str, Any]:
-    ds = load_dataset(settings, store, days)
+    start = training_start(settings, store, days)
+    ds = load_dataset(settings, store, start=start)
+    labelled = int(ds.frame[TARGET].notna().sum()) if TARGET in ds.frame else 0
+    log.info("train: %d labelled samples from %s (TRAIN_START=%s)", labelled, start, settings.train_start)
+    if labelled < MIN_TRAIN_SAMPLES:
+        raise NotEnoughData(f"Only {labelled} labelled samples since {start}; need {MIN_TRAIN_SAMPLES} "
+                            f"(about {MIN_TRAIN_SAMPLES * settings.windows.step / 60:.0f} hours of live collection)")
     cfg = ExperimentConfig(random_state=settings.random_state, fee_pct=settings.fee_pct)
+    if labelled < 1500:
+        cfg.n_splits = 3  # small live dataset: fewer, larger folds
     if models:
         cfg.models = models
     report = run_experiment(ds, cfg)
