@@ -74,3 +74,63 @@ def test_enrich_document_survives_backend_failure():
 
     sentiment, nlp = enrich_document(Broken(), {"_id": "1", "title": "Bitcoin rallies", "body": ""})
     assert sentiment["backend"] == "lexicon" and "word_count" in nlp
+
+
+def test_ner_models_load_once(monkeypatch):
+    """nltk.ne_chunk rebuilds its model on every call in NLTK >= 3.9, which made
+    scoring take seconds per article. The chunker must be built once."""
+    import nltk
+    import nltk.chunk
+    import nltk.tag
+    from nltk.tree import Tree
+
+    from cryptosent.sentiment import nlp_features as nf
+
+    built = {"chunker": 0, "tagger": 0}
+
+    class FakeChunker:
+        def parse(self, tagged):
+            return Tree("S", [Tree("PERSON", [tagged[0]])] if tagged else [])
+
+    class FakeTagger:
+        def __init__(self):
+            built["tagger"] += 1
+
+        def tag(self, tokens):
+            return [(t, "NNP") for t in tokens]
+
+    def fake_ne_chunker(fmt="multiclass"):
+        built["chunker"] += 1
+        return FakeChunker()
+
+    monkeypatch.setattr(nltk.chunk, "ne_chunker", fake_ne_chunker)
+    monkeypatch.setattr(nltk.tag, "PerceptronTagger", FakeTagger)
+    monkeypatch.setattr(nltk, "word_tokenize", str.split)
+    nf._nltk_ner.cache_clear()
+    try:
+        body = "Alice met Bob. " * 100
+        for _ in range(5):
+            feats = extract_features("Title here", body)
+        assert built == {"chunker": 1, "tagger": 1}
+        assert feats["ne_person_count"] == nf.MAX_NER_SENTENCES  # capped sentences
+    finally:
+        nf._nltk_ner.cache_clear()
+
+
+def test_enrich_pending_logs_progress(tmp_path, caplog):
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from cryptosent.collectors.news_base import Article
+    from cryptosent.pipeline import enrich_pending
+    from cryptosent.storage import LocalStore
+
+    store = LocalStore(tmp_path)
+    t0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    store.upsert_articles([Article(f"https://n/{i}", f"Bitcoin {i}", t0 + timedelta(minutes=i), "rss")
+                           for i in range(120)])
+    with caplog.at_level(logging.INFO, logger="cryptosent.pipeline"):
+        assert enrich_pending(Settings(data_dir=tmp_path), store, limit=120, backend="lexicon") == 120
+    progress = [r.getMessage() for r in caplog.records if "articles scored (" in r.getMessage()]
+    assert len(progress) == 2 and progress[0].startswith("enrich_pending: 50/120")
+    assert progress[1].startswith("enrich_pending: 100/120")

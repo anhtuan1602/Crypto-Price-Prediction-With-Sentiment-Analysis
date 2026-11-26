@@ -61,6 +61,7 @@ def articles_frame(docs: list[dict[str, Any]]) -> pd.DataFrame:
             "source": doc.get("source"),
             "publisher": doc.get("publisher"),
             "published_at": to_utc(doc["published_at"]),
+            "fetched_at": to_utc(doc["fetched_at"]) if doc.get("fetched_at") else None,
         }
         sent = doc.get("sentiment") or {}
         row.update({
@@ -76,6 +77,7 @@ def articles_frame(docs: list[dict[str, Any]]) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["article_id", "published_at", "title", "sentiment_score"])
     df["published_at"] = pd.to_datetime(df["published_at"], utc=True)
+    df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
     return df.sort_values("published_at").reset_index(drop=True)
 
 

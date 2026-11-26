@@ -146,6 +146,7 @@ class GeminiSentimentAgent:
         self._last_call = 0.0
         self._lock = threading.Lock()
         self._use_thinking_off = True
+        self._minimal_config = False  # set after a 400: drop optional generation settings
         self._tried: set[str] = set()
         self.disabled: GeminiConfigError | None = None
         self.session = requests.Session()
@@ -234,11 +235,15 @@ class GeminiSentimentAgent:
         while attempt < self.retries:
             attempt += 1
             url = f"{API_BASE}/models/{self.model}:generateContent"
-            config: dict[str, Any] = {
-                "temperature": 0.2, "topP": 0.8, "topK": 40, "maxOutputTokens": max_tokens,
-                "responseMimeType": "application/json", "responseSchema": schema,
-            }
-            if self._use_thinking_off:
+            if self._minimal_config:
+                # only settings every current model accepts; the prompt still asks for JSON
+                config: dict[str, Any] = {"temperature": 0.2, "responseMimeType": "application/json"}
+            else:
+                config = {
+                    "temperature": 0.2, "topP": 0.8, "topK": 40, "maxOutputTokens": max_tokens,
+                    "responseMimeType": "application/json", "responseSchema": schema,
+                }
+            if self._use_thinking_off and not self._minimal_config:
                 # classification needs no "thinking"; older 2.5 models accept a 0 budget
                 config["thinkingConfig"] = {"thinkingBudget": 0}
             body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": config}
@@ -262,6 +267,12 @@ class GeminiSentimentAgent:
                         self._use_thinking_off = False  # model does not accept a 0 budget
                         attempt -= 1  # not a failed attempt; bounded (happens once)
                         continue
+                    if resp.status_code == 400 and not self._minimal_config and "api key" not in text.lower():
+                        # a newer model may reject an optional field; retry once with a minimal request
+                        log.warning("Gemini rejected the request (%s); retrying with a minimal request", text)
+                        self._minimal_config = True
+                        attempt -= 1
+                        continue
                     if resp.status_code == 404:
                         try:
                             self._fall_back()
@@ -281,7 +292,8 @@ class GeminiSentimentAgent:
                     elif resp.status_code >= 500:
                         wait = min(60.0, 2.0 ** attempt)
                     else:
-                        kind = {404: "model", 401: "auth", 403: "auth"}.get(resp.status_code, "config")
+                        auth = resp.status_code in (401, 403) or "api key" in text.lower()
+                        kind = "auth" if auth else "config"
                         self.disabled = GeminiConfigError(
                             f"Gemini request failed and will not be retried: {text} (model '{self.model}')", kind)
                         raise self.disabled

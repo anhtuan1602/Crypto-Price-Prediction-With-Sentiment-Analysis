@@ -9,7 +9,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 ```
  CoinMarketCap ─┐                                    ┌─> MongoDB (articles, sentiment, nlp)
  RSS feeds ─────┼─ Airflow cmc_news_10m ─> Kafka ────┤
- CryptoCompare ─┘   (crawl, clean, dedup)  news.raw   └─ sentiment-consumer (Gemini + NLP) ─> news.scored
+ GDELT history ─┘   (crawl, clean, dedup)  news.raw   └─ sentiment-consumer (Gemini + NLP) ─> news.scored
  Binance 1m ────── Airflow btc_prices_5m ─────────────> MongoDB (prices)
                    Airflow train_daily ─> leakage-safe dataset ─> walk-forward eval ─> MLflow + model
                    Airflow predict_10m ─> predictions ─> FastAPI ─> dashboard
@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 54 tests
+pytest                         # 70 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
@@ -42,9 +42,15 @@ docker compose up -d --build
 | Airflow | http://localhost:8080 (user and password from `.env`) |
 | MLflow | http://localhost:5000 |
 
-Then, once, trigger the **`backfill_history`** DAG in Airflow (default 90 days).
-It loads 1-minute Binance candles and historical CryptoCompare news, then
-scores them. After that the scheduled DAGs keep everything current:
+Then, once, trigger the **`backfill_history`** DAG in Airflow. By default it
+loads 90 days of 1-minute Binance candles only. News comes from live
+collection, as in the original report: from the moment the stack is up,
+`cmc_news_10m` crawls full articles every 10 minutes and Gemini scores them.
+`train_daily` trains only on the period since the first live crawl
+(`TRAIN_START=auto`). It skips with a log line until there are 200 samples
+(about 33 hours). Five days give about 700 samples.
+
+The scheduled DAGs keep everything current:
 
 | DAG | Schedule | What it does |
 |---|---|---|
@@ -52,8 +58,42 @@ scores them. After that the scheduled DAGs keep everything current:
 | `btc_prices_5m` | every 5 min | sync Binance 1m candles |
 | `predict_10m` | every 10 min | predict the next window with the latest model |
 | `sentiment_catchup_1h` | hourly | score anything the Kafka consumer missed, upgrade some lexicon scores to Gemini |
-| `train_daily` | 02:00 UTC | backfill 2 days of news, retrain on the last 180 days, log to MLflow |
-| `backfill_history` | manual | initial history load |
+| `train_daily` | 02:00 UTC | score leftovers, retrain on the live-news period, log to MLflow (also trigger it by hand) |
+| `backfill_history` | manual | price history; historical news only if `news_days` > 0 |
+
+### Live news sources (no keys)
+
+* **CoinMarketCap**: the site's news content endpoint, with an HTML fallback.
+* **RSS** from 13 crypto outlets: CoinDesk, Cointelegraph, Decrypt, Bitcoin
+  Magazine, The Block, Bitcoinist, NewsBTC, CryptoSlate, CryptoPotato,
+  Bitcoin.com, U.Today, Cryptonews and BeInCrypto.
+* When a feed has only a teaser, the article page is downloaded **once** for
+  each new article and the main text is extracted (`FETCH_FULL_TEXT=true`,
+  at most 60 pages per run). A broken feed or a blocked page is skipped.
+* Expect roughly 300 to 600 BTC and crypto articles a day. This is an
+  estimate; the `crawl_news` log line shows the real counts per source.
+
+### Historical news (optional backfill)
+
+Off by default. Set `news_days` on `backfill_history` to use it. It mixes
+headline-only articles into training, so the default keeps to live full text.
+
+* **GDELT** (free, no key) searches news from about the **last 3
+  months** only. It returns headlines and links but no article text, so
+  those articles are scored on the title. Its timestamp is when GDELT first
+  saw the article, usually 15 to 60 minutes after publication. That delay
+  can only make news late, never early, so it cannot leak future data. GDELT
+  allows about one request every 5 seconds, so a 90-day backfill takes
+  roughly an hour. Titles are filtered for crypto terms.
+* **CryptoCompare** (CoinDesk Data) has article text and a longer history,
+  but its free tier ended in May 2026. It is used only when
+  `CRYPTOCOMPARE_API_KEY` is set.
+* For more than 3 months of history you need a paid source or GDELT's raw
+  GKG files (large downloads, not supported here). Over 3 months the model
+  still sees thousands of headlines, which is enough to compare news against
+  price-only features.
+* If one source fails, the others still run, and the log names the source
+  and its error.
 
 ### Gemini on the free tier
 
@@ -62,12 +102,20 @@ scores them. After that the scheduled DAGs keep everything current:
   article is scored twice.
 * If a model answers 404, the client switches to `gemini-flash-latest`, then
   to other Flash models your key lists, trying at most 3 models.
-* A rejected key or an unknown model gives **one** clear error, not a retry
-  storm. In `auto` mode the run then falls back to the offline lexicon.
+* A 400 is retried once with a minimal request. A rejected key, an unknown
+  model or a request that still fails gives **one** clear error, not a retry
+  storm. In `auto` mode the rest of the run then uses the offline lexicon
+  (upgrade later with `cryptosent rescore`).
 * When the daily quota runs out, scoring stops and the remaining articles
   wait for the next run. The API key goes in a request header and is
   redacted from logs.
-* A 90-day backfill is tens of thousands of articles, too many for a free
+* **Live volume vs quota.** New articles arrive a few at a time every 10
+  minutes, so the scorer sends at most about one request per crawl: 150 to
+  250 requests a day for 300 to 600 articles, plus 5 an hour for upgrading
+  lexicon scores. Check your model's requests-per-day limit in Google AI
+  Studio (Settings, Rate limits). Flash-Lite free tiers have allowed far more
+  than this. If the quota runs out, scoring pauses and catches up later.
+* A 90-day historical backfill is tens of thousands of articles, too many for a free
   daily quota. Trigger `backfill_history` with `sentiment_backend=lexicon`.
   The hourly `sentiment_catchup_1h` job then upgrades
   `GEMINI_RESCORE_PER_HOUR` of those articles to Gemini, newest first.
@@ -120,7 +168,7 @@ Results go to `artifacts/report.md`, `report.json`, `test_predictions.csv`,
 | Report | Here | Why |
 |---|---|---|
 | CoinGecko prices | Binance 1m klines | CoinGecko's free API has no 1-minute history |
-| CoinMarketCap only, 20 days | + RSS + CryptoCompare backfill | months of history and redundancy |
+| CoinMarketCap only, 20 days | + RSS + GDELT backfill (CryptoCompare with a key) | months of history and redundancy |
 | Prompt returns label + confidence | label + **score in [-1, 1]** + confidence + reasoning (JSON schema) | the S_market and std/min/max features need a score |
 | Lag described but audit only checked `article < window end` | lag enforced in code, audited on every row, unit tested | prevents same-window correlation counted as prediction |
 | Scaler / noise / correlation filter | fitted inside each training fold | no test statistics leak into training |
@@ -139,7 +187,7 @@ are usually easier to detect over an hour than over 10 minutes.
 
 ```
 src/cryptosent/
-  collectors/   coinmarketcap.py, rss.py, cryptocompare.py, prices.py (Binance), news_base.py
+  collectors/   coinmarketcap.py, rss.py, gdelt.py, cryptocompare.py, prices.py (Binance), news_base.py
   sentiment/    prompt.py, gemini.py, lexicon.py (offline), finbert.py (optional), nlp_features.py
   features/     technical.py, sentiment_agg.py, dataset.py (leakage-safe builder + audit)
   models/       registry.py, train.py (protocol), evaluate.py (metrics + backtest), baselines.py

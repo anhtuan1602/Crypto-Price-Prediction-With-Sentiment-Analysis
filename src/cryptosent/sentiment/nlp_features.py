@@ -47,25 +47,48 @@ FEATURE_NAMES = [
 ]
 
 
+MAX_NER_SENTENCES = 30  # entity counts saturate quickly; long bodies cost time, not signal
+
+
 @lru_cache(maxsize=1)
-def _nltk_ner_available() -> bool:
+def _nltk_ner():
+    """Load NLTK's tokenizer, POS tagger and NE chunker once per process.
+
+    ``nltk.ne_chunk`` rebuilds its maxent model from disk on *every* call in
+    NLTK 3.9+, which made per-sentence NER take seconds per article. We build
+    the chunker once and reuse it. Returns ``None`` when the models are not
+    installed (the heuristic below is used instead)."""
     try:
         import nltk
+        from nltk.tag import PerceptronTagger
 
-        nltk.ne_chunk(nltk.pos_tag(nltk.word_tokenize("Elon Musk visited the SEC.")))
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+        try:
+            from nltk.chunk import ne_chunker  # NLTK >= 3.9
+
+            chunker = ne_chunker()
+            chunk = chunker.parse
+        except ImportError:  # older NLTK: pickled chunker, ne_chunk caches it
+            chunk = nltk.ne_chunk
+        tagger = PerceptronTagger()
+        tokenize = nltk.word_tokenize
+        chunk(tagger.tag(tokenize("Elon Musk visited the SEC.")))  # smoke test
+        return tokenize, tagger, chunk
+    except Exception:  # noqa: BLE001 - models missing: use the heuristic
+        return None
+
+
+def _nltk_ner_available() -> bool:
+    return _nltk_ner() is not None
 
 
 def named_entities(text: str) -> tuple[int, int]:
     """Return (person_count, organisation_count)."""
-    if _nltk_ner_available():
-        import nltk
-
+    tools = _nltk_ner()
+    if tools is not None:
+        tokenize, tagger, chunk = tools
         persons = orgs = 0
-        for sentence in _SENT_SPLIT.split(text)[:200]:
-            tree = nltk.ne_chunk(nltk.pos_tag(nltk.word_tokenize(sentence)))
+        for sentence in _SENT_SPLIT.split(text)[:MAX_NER_SENTENCES]:
+            tree = chunk(tagger.tag(tokenize(sentence)))
             for node in tree:
                 label = getattr(node, "label", lambda: None)()
                 if label == "PERSON":

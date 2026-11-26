@@ -23,6 +23,10 @@ def _env_float(name: str, default: float) -> float:
     return float(_env(name, str(default)))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    return str(_env(name, str(default))).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _env_list(name: str, default: list[str]) -> list[str]:
     raw = _env(name)
     if raw is None:
@@ -83,6 +87,13 @@ class Settings:
     news_sources: list[str] = field(
         default_factory=lambda: _env_list("NEWS_SOURCES", ["coinmarketcap", "rss", "cryptocompare"])
     )
+    # historical backfill; cryptocompare is used only when CRYPTOCOMPARE_API_KEY is set
+    # (CoinDesk Data ended its free tier in May 2026), gdelt needs no key
+    news_backfill_sources: list[str] = field(
+        default_factory=lambda: _env_list("NEWS_BACKFILL_SOURCES", ["gdelt", "cryptocompare"])
+    )
+    # download the article page once for new articles whose feed only has a teaser
+    fetch_full_text: bool = field(default_factory=lambda: _env_bool("FETCH_FULL_TEXT", True))
     cryptocompare_api_key: str | None = field(default_factory=lambda: _env("CRYPTOCOMPARE_API_KEY"))
     http_proxies: list[str] = field(default_factory=lambda: _env_list("HTTP_PROXY_POOL", []))
     request_timeout: float = field(default_factory=lambda: _env_float("REQUEST_TIMEOUT", 20.0))
@@ -101,6 +112,11 @@ class Settings:
 
     # Modelling
     windows: WindowConfig = field(default_factory=WindowConfig.from_env)
+    # Where training data starts. "auto": the first live crawl (the earliest
+    # fetched_at of a NEWS_SOURCES article), so samples before live news
+    # collection, which have almost no articles, are left out. "all": no limit.
+    # Or an ISO timestamp such as 2026-11-26T18:00:00Z.
+    train_start: str = field(default_factory=lambda: _env("TRAIN_START", "auto"))
     target_flat_threshold: float = field(
         default_factory=lambda: _env_float("TARGET_FLAT_THRESHOLD_PCT", 0.02)
     )

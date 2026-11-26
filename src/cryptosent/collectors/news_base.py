@@ -121,6 +121,51 @@ def clean_text(raw: str | None) -> str:
     return _WS.sub(" ", text).strip()
 
 
+BODY_SELECTORS = (
+    "div.article-content", "[itemprop=articleBody]", "div.entry-content", "div.post-content",
+    "div.article-body", "div.article__body", "div.content-inner", "article", "main",
+)
+
+
+def parse_article_body(html_text: str, min_len: int = 200) -> str:
+    """Isolate the main text of an article page (report: ``div.article-content``,
+    plus the usual WordPress / news-site containers). Returns "" if nothing
+    article-sized is found."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    for tag in soup(["nav", "header", "footer", "aside", "form"]):
+        tag.decompose()
+    for selector in BODY_SELECTORS:
+        node = soup.select_one(selector)
+        if node is None:
+            continue
+        paragraphs = [p.get_text(" ") for p in node.find_all("p")]
+        text = clean_text(" ".join(paragraphs)) if paragraphs else clean_text(str(node))
+        if len(text) >= min_len:
+            return text
+    return ""
+
+
+def fetch_full_text(session: "PoliteSession", articles: list[Article], min_len: int = 400,
+                    max_fetch: int = 60) -> int:
+    """Replace teaser bodies with the full article text, at most ``max_fetch``
+    page downloads. Called only for new articles, so a page is fetched once."""
+    fetched = 0
+    for art in articles:
+        if fetched >= max_fetch:
+            break
+        if len(art.body) >= min_len:
+            continue
+        fetched += 1
+        resp = session.get(art.url)
+        if resp is None:
+            continue
+        body = parse_article_body(resp.text)
+        if len(body) > len(art.body):
+            art.body = body
+            art.extra = {**(art.extra or {}), "full_text": True}
+    return fetched
+
+
 def dedupe(articles: Iterable[Article]) -> list[Article]:
     seen: set[str] = set()
     out = []
@@ -166,7 +211,10 @@ class PoliteSession:
         url: str,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        return_errors: bool = False,
     ) -> requests.Response | None:
+        """GET with retries on 429/5xx. A 4xx is not retried; it returns None
+        unless ``return_errors`` (the caller wants the API's error body)."""
         for attempt in range(1, self.retries + 1):
             proxy = random.choice(self.proxies) if self.proxies else None
             try:
@@ -180,8 +228,9 @@ class PoliteSession:
                 if resp.status_code == 429 or resp.status_code >= 500:
                     raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
                 if resp.status_code >= 400:
-                    log.warning("GET %s -> HTTP %s (not retrying)", url, resp.status_code)
-                    return None
+                    log.warning("GET %s -> HTTP %s (not retrying): %s", url, resp.status_code,
+                                " ".join(resp.text[:200].split()))
+                    return resp if return_errors else None
                 return resp
             except requests.RequestException as exc:
                 wait = self.backoff**attempt + random.uniform(0, 1)

@@ -5,14 +5,15 @@
   predict_10m            every 10 min: score the latest decision time
   sentiment_catchup_1h   hourly:       score anything the Kafka consumer missed, then
                                        upgrade some lexicon-scored articles to Gemini
-  train_daily            02:00 UTC:    news backfill, retrain, evaluate, log to MLflow
-  backfill_history       manual:       load N days of prices + news (run once at setup)
+  train_daily            02:00 UTC:    score leftovers, retrain on the live-news period, log to MLflow
+  backfill_history       manual:       load N days of prices (optionally historical news), run once
 
 All heavy lifting lives in the ``cryptosent`` package; tasks are thin wrappers.
 Each task builds its own store/settings so it is safe on any worker.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from airflow.decorators import dag, task
@@ -25,6 +26,7 @@ DEFAULT_ARGS = {
     "execution_timeout": timedelta(minutes=30),
 }
 START = datetime(2025, 1, 1)
+log = logging.getLogger(__name__)
 
 
 def _ctx():
@@ -117,15 +119,11 @@ def sentiment_catchup_1h():
      max_active_runs=1, default_args={**DEFAULT_ARGS, "execution_timeout": timedelta(hours=3)},
      tags=["model"], params={"days": Param(180, type="integer", minimum=7)})
 def train_daily():
+    # Trains on live-collected news only (TRAIN_START=auto: from the first live
+    # crawl), matching the original report. Until there are ~33 hours of data
+    # the run is skipped with a clear log line instead of failing.
     @task
-    def backfill_recent_news() -> int:
-        from cryptosent.pipeline import backfill_news
-
-        settings, store = _ctx()
-        return backfill_news(settings, store, days=2)
-
-    @task
-    def score(_: int) -> int:
+    def score() -> int:
         from cryptosent.pipeline import enrich_pending
 
         settings, store = _ctx()
@@ -133,18 +131,27 @@ def train_daily():
 
     @task
     def train(_: int, params=None) -> dict:
-        from cryptosent.pipeline import json_safe, train
+        from cryptosent.pipeline import NotEnoughData, json_safe, train
 
         settings, store = _ctx()
-        report = train(settings, store, days=int(params["days"]))
-        return json_safe({"best_model": report["best_model"], "test": report["test"]})
+        try:
+            report = train(settings, store, days=int(params["days"]))
+        except NotEnoughData as exc:
+            log.warning("Skipping training: %s", exc)
+            return {"skipped": str(exc)}
+        return json_safe({"best_model": report["best_model"], "test": report["test"],
+                          "samples": report["samples"]})
 
-    train(score(backfill_recent_news()))
+    train(score())
 
 
 @dag(dag_id="backfill_history", schedule=None, start_date=START, catchup=False,
      default_args={**DEFAULT_ARGS, "execution_timeout": timedelta(hours=12)}, tags=["setup"],
      params={"days": Param(90, type="integer", minimum=1, maximum=1000),
+             # 0 = prices only (default: the model trains on live-collected news).
+             # >0 loads that many days of historical news from NEWS_BACKFILL_SOURCES
+             # (GDELT: headlines only, about 3 months).
+             "news_days": Param(0, type="integer", minimum=0, maximum=1000),
              "score_limit": Param(50000, type="integer", minimum=0),
              # "lexicon" scores the backfill offline (no Gemini quota used);
              # sentiment_catchup_1h then upgrades it to Gemini bit by bit
@@ -161,8 +168,11 @@ def backfill_history():
     def news(params=None) -> int:
         from cryptosent.pipeline import backfill_news
 
+        if int(params["news_days"]) <= 0:
+            log.info("news_days=0: skipping the historical news backfill")
+            return 0
         settings, store = _ctx()
-        return backfill_news(settings, store, days=int(params["days"]))
+        return backfill_news(settings, store, days=int(params["news_days"]))
 
     @task
     def score(_: int, params=None) -> int:
