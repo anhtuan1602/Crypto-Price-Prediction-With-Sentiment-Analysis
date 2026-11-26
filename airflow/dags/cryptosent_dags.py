@@ -3,7 +3,8 @@
   cmc_news_10m           every 10 min: crawl CoinMarketCap + RSS -> MongoDB + Kafka
   btc_prices_5m          every 5 min:  sync Binance 1m candles
   predict_10m            every 10 min: score the latest decision time
-  sentiment_catchup_1h   hourly:       score anything the Kafka consumer missed
+  sentiment_catchup_1h   hourly:       score anything the Kafka consumer missed, then
+                                       upgrade some lexicon-scored articles to Gemini
   train_daily            02:00 UTC:    news backfill, retrain, evaluate, log to MLflow
   backfill_history       manual:       load N days of prices + news (run once at setup)
 
@@ -96,7 +97,20 @@ def sentiment_catchup_1h():
         settings, store = _ctx()
         return enrich_pending(settings, store, limit=1000, min_age_minutes=30)
 
-    catch_up()
+    @task
+    def upgrade_lexicon_scores(_: int) -> int:
+        """Spend leftover Gemini quota on re-scoring lexicon-scored articles."""
+        from cryptosent.pipeline import rescore
+
+        settings, store = _ctx()
+        if not settings.gemini_api_key or settings.sentiment_backend == "lexicon":
+            return 0
+        try:
+            return rescore(settings, store, "lexicon", limit=settings.gemini_rescore_per_hour)
+        except ValueError:  # Gemini unusable right now: build_agent fell back to lexicon
+            return 0
+
+    upgrade_lexicon_scores(catch_up())
 
 
 @dag(dag_id="train_daily", schedule="0 2 * * *", start_date=START, catchup=False,
@@ -131,7 +145,10 @@ def train_daily():
 @dag(dag_id="backfill_history", schedule=None, start_date=START, catchup=False,
      default_args={**DEFAULT_ARGS, "execution_timeout": timedelta(hours=12)}, tags=["setup"],
      params={"days": Param(90, type="integer", minimum=1, maximum=1000),
-             "score_limit": Param(50000, type="integer", minimum=0)})
+             "score_limit": Param(50000, type="integer", minimum=0),
+             # "lexicon" scores the backfill offline (no Gemini quota used);
+             # sentiment_catchup_1h then upgrades it to Gemini bit by bit
+             "sentiment_backend": Param("auto", enum=["auto", "gemini", "lexicon"])})
 def backfill_history():
     @task
     def prices(params=None) -> int:
@@ -152,7 +169,8 @@ def backfill_history():
         from cryptosent.pipeline import enrich_pending
 
         settings, store = _ctx()
-        return enrich_pending(settings, store, limit=int(params["score_limit"]))
+        backend = None if params["sentiment_backend"] == "auto" else params["sentiment_backend"]
+        return enrich_pending(settings, store, limit=int(params["score_limit"]), backend=backend)
 
     prices()
     score(news())

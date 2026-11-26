@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 36 tests
+pytest                         # 54 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
@@ -51,13 +51,27 @@ scores them. After that the scheduled DAGs keep everything current:
 | `cmc_news_10m` | every 10 min | crawl CoinMarketCap + RSS, dedupe, store, publish to Kafka |
 | `btc_prices_5m` | every 5 min | sync Binance 1m candles |
 | `predict_10m` | every 10 min | predict the next window with the latest model |
-| `sentiment_catchup_1h` | hourly | score anything the Kafka consumer missed |
+| `sentiment_catchup_1h` | hourly | score anything the Kafka consumer missed, upgrade some lexicon scores to Gemini |
 | `train_daily` | 02:00 UTC | backfill 2 days of news, retrain on the last 180 days, log to MLflow |
 | `backfill_history` | manual | initial history load |
 
-Scoring 90 days of news with Gemini is roughly 20 to 40k calls. Set
-`GEMINI_RPM` to your quota. Results are stored per article, so nothing is
-scored twice.
+### Gemini on the free tier
+
+* The client scores `GEMINI_BATCH_SIZE` articles (default 10) per request
+  and paces calls to `GEMINI_RPM` (default 10). It stores each result, so no
+  article is scored twice.
+* If a model answers 404, the client switches to `gemini-flash-latest`, then
+  to other Flash models your key lists, trying at most 3 models.
+* A rejected key or an unknown model gives **one** clear error, not a retry
+  storm. In `auto` mode the run then falls back to the offline lexicon.
+* When the daily quota runs out, scoring stops and the remaining articles
+  wait for the next run. The API key goes in a request header and is
+  redacted from logs.
+* A 90-day backfill is tens of thousands of articles, too many for a free
+  daily quota. Trigger `backfill_history` with `sentiment_backend=lexicon`.
+  The hourly `sentiment_catchup_1h` job then upgrades
+  `GEMINI_RESCORE_PER_HOUR` of those articles to Gemini, newest first.
+  To do it by hand, run `cryptosent rescore --from-backend lexicon --limit N`.
 
 ## How a sample is built
 
@@ -142,7 +156,8 @@ tests/          unit + end-to-end tests
 ## CLI
 
 ```
-cryptosent crawl | prices [--backfill-days N] | backfill-news --days N | enrich
+cryptosent crawl | prices [--backfill-days N] | backfill-news --days N
+cryptosent enrich [--backend lexicon] | rescore --from-backend lexicon --limit N
 cryptosent dataset --out file.csv | train [--days N] [--models ...] | predict
 cryptosent consume | serve | demo
 ```

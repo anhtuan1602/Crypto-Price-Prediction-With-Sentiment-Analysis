@@ -90,8 +90,14 @@ class Settings:
     # Sentiment
     sentiment_backend: str = field(default_factory=lambda: _env("SENTIMENT_BACKEND", "auto"))
     gemini_api_key: str | None = field(default_factory=lambda: _env("GEMINI_API_KEY"))
-    gemini_model: str = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.5-flash"))
-    gemini_rpm: int = field(default_factory=lambda: _env_int("GEMINI_RPM", 60))
+    # Confirmed working on the free tier (2026-11). If a model answers 404 the client
+    # moves on to gemini-flash-latest and then other listed Flash models (sentiment/gemini.py).
+    gemini_model: str = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-3.5-flash-lite"))
+    # free-tier friendly defaults; raise them on a paid key
+    gemini_rpm: int = field(default_factory=lambda: _env_int("GEMINI_RPM", 10))
+    gemini_batch_size: int = field(default_factory=lambda: _env_int("GEMINI_BATCH_SIZE", 10))
+    # hourly budget for upgrading lexicon-scored articles to Gemini (0 = off)
+    gemini_rescore_per_hour: int = field(default_factory=lambda: _env_int("GEMINI_RESCORE_PER_HOUR", 50))
 
     # Modelling
     windows: WindowConfig = field(default_factory=WindowConfig.from_env)

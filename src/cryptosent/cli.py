@@ -22,6 +22,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--backfill-days", type=int, default=None)
     p = sub.add_parser("enrich", help="score articles that have no sentiment yet")
     p.add_argument("--limit", type=int, default=500)
+    p.add_argument("--backend", default=None, help="override SENTIMENT_BACKEND for this run (e.g. lexicon)")
+    p = sub.add_parser("rescore", help="re-score articles scored earlier by another backend")
+    p.add_argument("--from-backend", default="lexicon")
+    p.add_argument("--limit", type=int, default=500)
     p = sub.add_parser("dataset", help="build the modelling table and write it to CSV")
     p.add_argument("--days", type=int, default=None)
     p.add_argument("--out", default="artifacts/dataset.csv")
@@ -60,7 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "prices":
         result = {"new_candles": pipeline.fetch_prices(settings, store, args.backfill_days)}
     elif args.command == "enrich":
-        result = {"scored": pipeline.enrich_pending(settings, store, args.limit)}
+        result = {"scored": pipeline.enrich_pending(settings, store, args.limit, backend=args.backend)}
+    elif args.command == "rescore":
+        result = {"rescored": pipeline.rescore(settings, store, args.from_backend, args.limit)}
     elif args.command == "dataset":
         ds = pipeline.load_dataset(settings, store, args.days)
         ds.frame.to_csv(args.out)
