@@ -1,0 +1,194 @@
+# Full stack: MongoDB, Kafka (KRaft), MLflow, Airflow (LocalExecutor + Postgres),
+# the Kafka sentiment consumer and the API/dashboard.
+#
+#   cp .env.example .env      # add GEMINI_API_KEY (optional) and change AIRFLOW_ADMIN_PASSWORD
+#   docker compose up -d --build
+#
+# Dashboard http://localhost:8000 · Airflow http://localhost:8080 · MLflow http://localhost:5000
+
+x-cryptosent-env: &cryptosent-env
+  MONGO_URI: mongodb://mongo:27017
+  MONGO_DB: cryptosent
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  ARTIFACTS_DIR: /opt/cryptosent/artifacts
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+  GEMINI_RPM: ${GEMINI_RPM:-60}
+  SENTIMENT_BACKEND: ${SENTIMENT_BACKEND:-auto}
+  CRYPTOCOMPARE_API_KEY: ${CRYPTOCOMPARE_API_KEY:-}
+  HTTP_PROXY_POOL: ${HTTP_PROXY_POOL:-}
+  NEWS_SOURCES: ${NEWS_SOURCES:-coinmarketcap,rss,cryptocompare}
+  SYMBOL: ${SYMBOL:-BTCUSDT}
+  WINDOW_OBS_MIN: ${WINDOW_OBS_MIN:-30}
+  WINDOW_LAG_MIN: ${WINDOW_LAG_MIN:-10}
+  WINDOW_PRED_MIN: ${WINDOW_PRED_MIN:-10}
+  WINDOW_STEP_MIN: ${WINDOW_STEP_MIN:-10}
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  image: cryptosent-airflow:latest
+  environment:
+    <<: *cryptosent-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__PARALLELISM: 8
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-change-me}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+    - artifacts:/opt/cryptosent/artifacts
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mongo:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.8.0
+    restart: unless-stopped
+    ports: ["9094:9094"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes: [kafka-data:/var/lib/kafka/data]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      retries: 15
+
+  kafka-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        for t in news.raw news.scored; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+            --topic "$$t" --partitions 3 --replication-factor 1
+        done
+    restart: "no"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    restart: unless-stopped
+    ports: ["5000:5000"]
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --serve-artifacts --artifacts-destination /mlflow/artifacts
+    volumes: [mlflow-data:/mlflow]
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create --role Admin --username "$${AIRFLOW_ADMIN_USER:-admin}" \
+          --password "$${AIRFLOW_ADMIN_PASSWORD:-admin}" --firstname Admin --lastname User \
+          --email admin@example.com || true
+    environment:
+      <<: *cryptosent-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER:-admin}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports: ["8080:8080"]
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  sentiment-consumer:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: cryptosent-app:latest
+    command: ["cryptosent", "consume"]
+    restart: unless-stopped
+    environment: *cryptosent-env
+    depends_on:
+      mongo:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+
+  api:
+    image: cryptosent-app:latest
+    command: ["cryptosent", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    environment: *cryptosent-env
+    volumes: [artifacts:/opt/cryptosent/artifacts]
+    depends_on:
+      mongo:
+        condition: service_healthy
+      sentiment-consumer:
+        condition: service_started
+
+volumes:
+  mongo-data:
+  kafka-data:
+  mlflow-data:
+  postgres-data:
+  airflow-logs:
+  artifacts:

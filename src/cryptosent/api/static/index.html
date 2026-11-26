@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTC Sentiment Monitor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --border: #e4e7ec;
+    --accent: #2f6fed; --up: #12a150; --down: #d92d20; --warn: #b54708; --neutral: #667085;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --panel: #171b24; --text: #e6e9ef; --muted: #98a2b3; --border: #2a3140;
+      --accent: #6b9bff; --up: #3ccf7a; --down: #ff6b5e; --warn: #f5a524; --neutral: #98a2b3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 20px 16px 8px; max-width: 1280px; margin: 0 auto; display: flex;
+           justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600;
+       text-transform: uppercase; letter-spacing: .04em; }
+  main { max-width: 1280px; margin: 0 auto; padding: 8px 16px 32px; display: grid; gap: 16px;
+         grid-template-columns: repeat(12, 1fr); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+           min-width: 0; }
+  .kpi { grid-column: span 3; }
+  .kpi .value { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .kpi .sub { color: var(--muted); font-size: 12px; }
+  .wide { grid-column: span 8; } .side { grid-column: span 4; } .full { grid-column: span 12; }
+  .chart { position: relative; height: 300px; }
+  .muted { color: var(--muted); }
+  .up { color: var(--up); } .down { color: var(--down); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num, th.num { text-align: right; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+          border: 1px solid currentColor; white-space: nowrap; }
+  .chip.bullish { color: var(--up); } .chip.bearish { color: var(--down); }
+  .chip.manipulation { color: var(--warn); } .chip.neutral { color: var(--neutral); }
+  .news { max-height: 520px; overflow-y: auto; }
+  .news a { color: var(--text); text-decoration: none; } .news a:hover { color: var(--accent); }
+  .scroll-x { overflow-x: auto; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  @media (max-width: 900px) {
+    .kpi { grid-column: span 6; } .wide, .side { grid-column: span 12; }
+  }
+  @media (max-width: 520px) { .kpi { grid-column: span 12; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>BTC sentiment monitor</h1>
+  <span class="muted" id="updated">Loading…</span>
+</header>
+<main>
+  <section class="panel kpi"><h2>BTC price</h2><div class="value" id="k-price">–</div><div class="sub" id="k-price-sub"></div></section>
+  <section class="panel kpi"><h2>Market sentiment</h2><div class="value" id="k-sent">–</div><div class="sub" id="k-sent-sub"></div></section>
+  <section class="panel kpi"><h2>Latest prediction</h2><div class="value" id="k-pred">–</div><div class="sub" id="k-pred-sub"></div></section>
+  <section class="panel kpi"><h2>Model (test set)</h2><div class="value" id="k-model">–</div><div class="sub" id="k-model-sub"></div></section>
+
+  <section class="panel wide"><h2>Price vs. sentiment index</h2><div class="chart"><canvas id="c-price"></canvas></div>
+    <div class="note">Sentiment index = confidence-weighted mean article score over the observation window.</div></section>
+  <section class="panel side"><h2>Latest news</h2><div class="news"><table><tbody id="news"></tbody></table></div></section>
+
+  <section class="panel wide"><h2>Predicted vs. actual move (%)</h2><div class="chart"><canvas id="c-pred"></canvas></div>
+    <div class="note" id="pred-note"></div></section>
+  <section class="panel side"><h2>Feature-set ablation</h2><div class="scroll-x"><table id="ablation"></table></div>
+    <div class="note">Same model, split and settings; only the feature groups change.</div></section>
+
+  <section class="panel full"><h2>Backtest on held-out period</h2><div class="scroll-x"><table id="backtest"></table></div>
+    <div class="note">Long/short over each prediction window, fees charged per side, non-overlapping trades.</div></section>
+</main>
+<script>
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt = (v, d = 2) => v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d);
+const pct = (v, d = 3) => v === null || v === undefined ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(d) + "%";
+const timeLabel = ms => new Date(ms).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+async function get(path) { const r = await fetch(path); if (!r.ok) throw new Error(path); return r.json(); }
+const charts = {};
+
+function lineChart(id, datasets, yAxes) {
+  if (charts[id]) charts[id].destroy();
+  const grid = css("--border"), muted = css("--muted");
+  const xs = datasets.flatMap(d => d.data.map(pt => pt.x));
+  const scales = { x: { type: "linear", min: xs.length ? Math.min(...xs) : undefined, max: xs.length ? Math.max(...xs) : undefined, ticks: { color: muted, maxTicksLimit: 6, callback: v => timeLabel(v) },
+                        grid: { color: grid } } };
+  for (const [k, cfg] of Object.entries(yAxes)) scales[k] = { ticks: { color: muted }, grid: { color: grid, drawOnChartArea: k === "y" }, ...cfg };
+  charts[id] = new Chart(document.getElementById(id), {
+    type: "line", data: { datasets },
+    options: { responsive: true, maintainAspectRatio: false, animation: false, parsing: false, normalized: true,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { labels: { color: css("--text"), boxWidth: 12 } },
+                 tooltip: { callbacks: { title: items => timeLabel(items[0].parsed.x) } } },
+      elements: { point: { radius: 0 } }, scales }
+  });
+}
+
+async function refresh() {
+  const [prices, sent, news, preds, model, testPreds] = await Promise.all([
+    get("/api/prices?hours=24"), get("/api/sentiment?hours=24"), get("/api/news?limit=40"),
+    get("/api/predictions?limit=300"), get("/api/model"), get("/api/test-predictions")]);
+
+  if (prices.length) {
+    const last = prices[prices.length - 1], first = prices[0];
+    const ch = (last.price / first.price - 1) * 100;
+    document.getElementById("k-price").textContent = "$" + Number(last.price).toLocaleString(undefined, {maximumFractionDigits: 0});
+    const sub = document.getElementById("k-price-sub");
+    sub.textContent = pct(ch, 2) + " over 24h"; sub.className = "sub " + (ch >= 0 ? "up" : "down");
+    document.getElementById("updated").textContent = "Data through " + timeLabel(Date.parse(last.t));
+  }
+  if (sent.length) {
+    const s = sent[sent.length - 1];
+    const el = document.getElementById("k-sent");
+    el.textContent = fmt(s.sent_market, 2); el.className = "value " + (s.sent_market > 0.05 ? "up" : s.sent_market < -0.05 ? "down" : "");
+    document.getElementById("k-sent-sub").textContent = `${s.n_articles} article${s.n_articles === 1 ? "" : "s"} in window, ${s.n_manipulation} flagged as manipulation`;
+  }
+  lineChart("c-price", [
+    { label: "BTC price", data: prices.map(p => ({x: Date.parse(p.t), y: p.price})), borderColor: css("--accent"), borderWidth: 1.5, yAxisID: "y" },
+    { label: "Sentiment index", data: sent.map(s => ({x: Date.parse(s.t), y: s.sent_market})), borderColor: css("--warn"), borderWidth: 1.5, stepped: true, yAxisID: "y1" },
+  ], { y: { position: "left" }, y1: { position: "right", min: -1, max: 1 } });
+
+  document.getElementById("news").innerHTML = news.map(n => `
+    <tr><td><span class="chip ${esc(n.sentiment_label || "neutral")}">${esc(n.sentiment_label || "pending")}</span></td>
+    <td><a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a>
+    <div class="muted" style="font-size:12px">${esc(n.publisher || n.source)} · ${timeLabel(Date.parse(n.published_at))}
+    · score ${fmt(n.sentiment_score)} · conf ${fmt(n.sentiment_confidence)}</div></td></tr>`).join("")
+    || `<tr><td class="muted">No articles yet.</td></tr>`;
+
+  const live = preds.filter(p => p.predicted_pct !== null);
+  const series = live.length ? live.map(p => ({t: p.decision_time, actual: p.actual_pct, predicted: p.predicted_pct}))
+                             : testPreds;
+  document.getElementById("pred-note").textContent = live.length
+    ? "Live predictions. The actual move fills in once the prediction window closes."
+    : "No live predictions yet: showing the held-out test period of the last training run.";
+  if (live.length) {
+    const p = live[live.length - 1];
+    const el = document.getElementById("k-pred");
+    el.textContent = pct(p.predicted_pct); el.className = "value " + (p.predicted_pct >= 0 ? "up" : "down");
+    document.getElementById("k-pred-sub").textContent = `signal ${p.signal}, for ${timeLabel(Date.parse(p.target_start))} to ${new Date(Date.parse(p.target_end)).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}`;
+  }
+  lineChart("c-pred", [
+    { label: "Actual", data: series.filter(r => r.actual !== null).map(r => ({x: Date.parse(r.t), y: r.actual})), borderColor: css("--accent"), borderWidth: 1 },
+    { label: "Predicted", data: series.map(r => ({x: Date.parse(r.t), y: r.predicted})), borderColor: css("--warn"), borderWidth: 1.5 },
+  ], { y: {} });
+
+  if (model && model.test) {
+    const full = model.test.technical_plus_news || Object.values(model.test)[0];
+    document.getElementById("k-model").textContent = fmt(full.direction_accuracy * 100, 1) + "%";
+    document.getElementById("k-model-sub").textContent = `direction accuracy · R² ${fmt(full.r2, 3)} · ${model.best_model}`;
+    const rows = Object.entries(model.test).filter(([k]) => !k.includes("__"))
+      .concat(Object.entries(model.test_baselines || {}).map(([k, v]) => ["baseline: " + k, v]));
+    document.getElementById("ablation").innerHTML = `<thead><tr><th>Features</th><th class="num">MAE</th><th class="num">R²</th><th class="num">Dir.</th></tr></thead><tbody>` +
+      rows.map(([k, m]) => `<tr><td>${esc(k.replaceAll("_", " "))}</td><td class="num">${fmt(m.mae, 3)}</td><td class="num">${fmt(m.r2, 3)}</td><td class="num">${fmt(m.direction_accuracy * 100, 1)}%</td></tr>`).join("") + "</tbody>";
+    const bt = model.backtest || {};
+    document.getElementById("backtest").innerHTML = `<thead><tr><th>Variant</th><th class="num">Trades</th><th class="num">Return</th><th class="num">Win rate</th><th class="num">Sharpe</th><th class="num">Max DD</th><th class="num">Buy &amp; hold</th></tr></thead><tbody>` +
+      Object.entries(bt).map(([k, b]) => `<tr><td>${esc(k.replaceAll("_", " "))}</td><td class="num">${b.trades}</td><td class="num">${pct(b.total_return_pct, 2)}</td><td class="num">${b.win_rate === null ? "–" : fmt(b.win_rate * 100, 1) + "%"}</td><td class="num">${fmt(b.sharpe_annualised, 2)}</td><td class="num">${fmt(b.max_drawdown_pct, 2)}%</td><td class="num">${pct(b.buy_and_hold_pct, 2)}</td></tr>`).join("") + "</tbody>";
+  }
+}
+refresh().catch(e => { document.getElementById("updated").textContent = "Could not load data: " + e.message; });
+setInterval(() => refresh().catch(() => {}), 60_000);
+</script>
+</body>
+</html>
