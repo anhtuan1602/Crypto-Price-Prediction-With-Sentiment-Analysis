@@ -242,22 +242,66 @@ def test_rescore_upgrades_lexicon_scores(tmp_path, monkeypatch):
     assert backends == {"gemini"}
 
 
-def test_400_retries_once_with_minimal_request():
+def test_400_naming_a_field_drops_only_that_field():
     s = FakeSession(posts=[err(400, "Invalid JSON payload received. Unknown name \"topK\"", "INVALID_ARGUMENT"),
                            ok({"label": "bullish", "score": 0.2, "confidence": 0.6, "reasoning": "x"})])
     assert make_agent(s).score("t").label == "bullish"
     first, second = s.calls[0][2]["generationConfig"], s.calls[1][2]["generationConfig"]
-    assert "topK" in first and "responseSchema" in first
-    assert set(second) == {"temperature", "responseMimeType"}
+    assert "topK" in first and "topK" not in second and "topP" not in second
+    assert "responseSchema" in second and "thinkingConfig" in second
 
 
-def test_repeated_400_fails_fast_after_two_calls():
+def test_generic_400_drops_fields_step_by_step_and_remembers(caplog):
+    generic = err(400, "Request contains an invalid argument.", "INVALID_ARGUMENT")
+    good = ok([item(0), item(1)])
+    s = FakeSession(posts=[generic, generic, good, good])
+    agent = make_agent(s, batch_size=10)
+    with caplog.at_level(logging.WARNING):
+        agent.score_batch([("a", ""), ("b", "")])
+        agent.score_batch([("c", ""), ("d", "")])  # no probing the second time
+    configs = [c[2]["generationConfig"] for c in s.calls]
+    assert len(configs) == 4
+    assert "thinkingConfig" in configs[0]
+    assert "thinkingConfig" not in configs[1] and "topK" in configs[1]
+    assert "topK" not in configs[2] and configs[2]["responseSchema"]["minItems"] == 2
+    assert configs[3] == configs[2]
+    assert configs[2]["maxOutputTokens"] > configs[0]["maxOutputTokens"]  # room for thinking
+    assert "works without: thinkingConfig, topP/topK" in caplog.text
+
+
+def test_schema_bounds_stripped_when_rejected():
+    s = FakeSession(posts=[err(400, "Invalid value at 'generation_config.response_schema.max_items'",
+                               "INVALID_ARGUMENT"), ok([item(0), item(1)])])
+    make_agent(s, batch_size=10).score_batch([("a", ""), ("b", "")])
+    second = s.calls[1][2]["generationConfig"]
+    assert "maxItems" not in json.dumps(second) and second["responseSchema"]["type"] == "ARRAY"
+    assert "thinkingConfig" in second
+
+
+def test_400_that_never_goes_away_fails_fast():
     bad = err(400, "Request contains an invalid argument.", "INVALID_ARGUMENT")
-    s = FakeSession(posts=[bad, bad])
+    s = FakeSession(posts=[bad] * (len(gm.COMPAT_STEPS) + 1))
     agent = make_agent(s)
     with pytest.raises(GeminiConfigError) as exc:
         agent.score("t")
-    assert exc.value.kind == "config" and len(s.calls) == 2
+    assert exc.value.kind == "config" and len(s.calls) == len(gm.COMPAT_STEPS) + 1
+    assert set(s.calls[-1][2]["generationConfig"]) == {"temperature", "responseMimeType"}
+
+
+def test_persistent_503_falls_back_to_lexicon_and_is_rescored_later(tmp_path, monkeypatch):
+    import cryptosent.pipeline as pl
+
+    store = _store_with_articles(tmp_path, 3)
+    busy = err(503, "This model is currently experiencing high demand.", "UNAVAILABLE")
+    s = FakeSession(posts=[busy] * 4)
+    agent = make_agent(s, batch_size=10)
+    settings = Settings(data_dir=tmp_path, gemini_api_key=KEY)
+    assert enrich_pending(settings, store, limit=10, agent=agent) == 3  # nothing dropped
+    assert set(store.get_articles()["sentiment_backend"]) == {"lexicon"}
+    s2 = FakeSession(posts=[ok([item(i) for i in range(3)])])
+    monkeypatch.setattr(pl, "build_agent", lambda *a, **k: make_agent(s2, batch_size=10))
+    assert rescore(settings, store, "lexicon", limit=50) == 3  # hourly catch-up upgrades them
+    assert set(store.get_articles()["sentiment_backend"]) == {"gemini"}
 
 
 def test_invalid_key_400_is_not_retried():
@@ -270,13 +314,13 @@ def test_invalid_key_400_is_not_retried():
 def test_enrich_pending_auto_switches_to_lexicon_on_bad_request(tmp_path, caplog):
     store = _store_with_articles(tmp_path, 25)
     bad = err(400, "Request contains an invalid argument.", "INVALID_ARGUMENT")
-    s = FakeSession(posts=[bad, bad])
+    s = FakeSession(posts=[bad] * (len(gm.COMPAT_STEPS) + 1))
     agent = make_agent(s, batch_size=10)
     settings = Settings(data_dir=tmp_path, gemini_api_key=KEY, sentiment_backend="auto")
     with caplog.at_level(logging.WARNING):
         done = enrich_pending(settings, store, limit=100, agent=agent)
     assert done == 25 and not store.articles_missing_sentiment(100)
     assert set(store.get_articles()["sentiment_backend"]) == {"lexicon"}
-    assert len(s.calls) == 2  # one minimal retry, then no more Gemini calls
+    assert len(s.calls) == len(gm.COMPAT_STEPS) + 1  # probing, then no more Gemini calls
     assert len([r for r in caplog.records if r.levelno >= logging.ERROR]) == 1
     assert KEY not in caplog.text

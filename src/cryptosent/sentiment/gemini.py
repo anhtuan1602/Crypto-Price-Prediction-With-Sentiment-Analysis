@@ -127,6 +127,29 @@ def build_batch_prompt(items: list[tuple[str, str]], max_chars: int = 3000) -> s
     )
 
 
+# Optional request fields, dropped one step at a time after a generic 400
+# ("Request contains an invalid argument") until the model accepts the request.
+# The step that works is logged, so the offending field is known, and kept for
+# the rest of the process, so the probing costs a few calls once per start.
+# (label, internal flags, words that identify the field in an error message)
+COMPAT_STEPS: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
+    ("thinkingConfig", ("thinkingConfig",), ("thinking",)),
+    ("topP/topK", ("topP", "topK"), ("topp", "topk", "top_p", "top_k")),
+    ("schema minItems/maxItems", ("schemaBounds",), ("minitems", "maxitems", "min_items", "max_items")),
+    ("responseSchema", ("responseSchema",), ("responseschema", "response_schema", "schema")),
+    ("maxOutputTokens", ("maxOutputTokens",), ("maxoutputtokens", "max_output_tokens")),
+]
+THINKING_HEADROOM = 2048  # output tokens reserved for thinking when it cannot be turned off
+
+
+def _strip_bounds(schema: Any) -> Any:
+    if isinstance(schema, dict):
+        return {k: _strip_bounds(v) for k, v in schema.items() if k not in ("minItems", "maxItems")}
+    if isinstance(schema, list):
+        return [_strip_bounds(v) for v in schema]
+    return schema
+
+
 class GeminiSentimentAgent:
     backend = "gemini"
 
@@ -145,8 +168,8 @@ class GeminiSentimentAgent:
         self._min_interval = 60.0 / max(rpm, 1)
         self._last_call = 0.0
         self._lock = threading.Lock()
-        self._use_thinking_off = True
-        self._minimal_config = False  # set after a 400: drop optional generation settings
+        self._dropped: set[str] = set()  # optional fields this model rejected (see COMPAT_STEPS)
+        self._compat_step = 0
         self._tried: set[str] = set()
         self.disabled: GeminiConfigError | None = None
         self.session = requests.Session()
@@ -235,17 +258,7 @@ class GeminiSentimentAgent:
         while attempt < self.retries:
             attempt += 1
             url = f"{API_BASE}/models/{self.model}:generateContent"
-            if self._minimal_config:
-                # only settings every current model accepts; the prompt still asks for JSON
-                config: dict[str, Any] = {"temperature": 0.2, "responseMimeType": "application/json"}
-            else:
-                config = {
-                    "temperature": 0.2, "topP": 0.8, "topK": 40, "maxOutputTokens": max_tokens,
-                    "responseMimeType": "application/json", "responseSchema": schema,
-                }
-            if self._use_thinking_off and not self._minimal_config:
-                # classification needs no "thinking"; older 2.5 models accept a 0 budget
-                config["thinkingConfig"] = {"thinkingBudget": 0}
+            config = self._config(schema, max_tokens)
             body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": config}
             self._throttle()
             try:
@@ -255,6 +268,7 @@ class GeminiSentimentAgent:
                 wait = min(60.0, 2.0 ** attempt)
             else:
                 if resp.status_code == 200:
+                    self._accepted()
                     try:
                         return parse_response(resp.json())
                     except (ValueError, json.JSONDecodeError) as exc:
@@ -263,15 +277,8 @@ class GeminiSentimentAgent:
                 else:
                     text = self._error_text(resp)
                     last_error = text
-                    if resp.status_code == 400 and self._use_thinking_off and "thinking" in text.lower():
-                        self._use_thinking_off = False  # model does not accept a 0 budget
-                        attempt -= 1  # not a failed attempt; bounded (happens once)
-                        continue
-                    if resp.status_code == 400 and not self._minimal_config and "api key" not in text.lower():
-                        # a newer model may reject an optional field; retry once with a minimal request
-                        log.warning("Gemini rejected the request (%s); retrying with a minimal request", text)
-                        self._minimal_config = True
-                        attempt -= 1
+                    if resp.status_code == 400 and "api key" not in text.lower() and self._relax(text):
+                        attempt -= 1  # not a failed attempt; bounded by len(COMPAT_STEPS)
                         continue
                     if resp.status_code == 404:
                         try:
@@ -290,7 +297,8 @@ class GeminiSentimentAgent:
                         hint = _RETRY_DELAY_RE.search(resp.text)
                         wait = float(hint.group(1)) + 1 if hint else min(60.0, 5.0 * attempt)
                     elif resp.status_code >= 500:
-                        wait = min(60.0, 2.0 ** attempt)
+                        # 503 "high demand" spikes usually pass within a minute
+                        wait = min(60.0, 10.0 * attempt)
                     else:
                         auth = resp.status_code in (401, 403) or "api key" in text.lower()
                         kind = "auth" if auth else "config"
@@ -301,6 +309,42 @@ class GeminiSentimentAgent:
                 log.warning("Gemini call failed (%s), retry %d/%d in %.0fs", last_error, attempt, self.retries, wait)
                 time.sleep(wait)
         raise RuntimeError(f"Gemini scoring failed after {self.retries} attempts: {last_error}")
+
+    def _config(self, schema: dict[str, Any], max_tokens: int) -> dict[str, Any]:
+        drop = self._dropped
+        config: dict[str, Any] = {"temperature": 0.2, "responseMimeType": "application/json"}
+        if "topP" not in drop:
+            config.update(topP=0.8, topK=40)
+        if "maxOutputTokens" not in drop:
+            config["maxOutputTokens"] = max_tokens + (THINKING_HEADROOM if "thinkingConfig" in drop else 0)
+        if "responseSchema" not in drop:
+            config["responseSchema"] = _strip_bounds(schema) if "schemaBounds" in drop else schema
+        if "thinkingConfig" not in drop:
+            # classification needs no "thinking"
+            config["thinkingConfig"] = {"thinkingBudget": 0}
+        return config
+
+    def _relax(self, error: str) -> bool:
+        """Drop the next optional field after a 400. An error that names a field
+        drops that one directly. False when nothing is left to drop."""
+        lowered = error.lower().replace(" ", "")
+        remaining = range(self._compat_step, len(COMPAT_STEPS))
+        step = next((i for i in remaining if any(w in lowered for w in COMPAT_STEPS[i][2])), self._compat_step)
+        if step >= len(COMPAT_STEPS):
+            return False
+        label, fields, _ = COMPAT_STEPS[step]
+        self._dropped.update(fields)
+        self._compat_step = step + 1
+        log.warning("Gemini rejected the request for model '%s' (%s); retrying without %s",
+                    self.model, error, label)
+        return True
+
+    def _accepted(self) -> None:
+        if self._dropped and not getattr(self, "_reported", False):
+            self._reported = True
+            names = [label for label, fields, _ in COMPAT_STEPS if set(fields) <= self._dropped]
+            log.warning("Gemini model '%s' works without: %s (the last one is the rejected field). "
+                        "Using that for the rest of this run.", self.model, ", ".join(names))
 
     # -- public API ---------------------------------------------------------
     def _result(self, data: dict[str, Any]) -> SentimentResult:
