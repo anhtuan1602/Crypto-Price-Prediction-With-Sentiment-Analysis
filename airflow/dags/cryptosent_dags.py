@@ -13,6 +13,7 @@ Each task builds its own store/settings so it is safe on any worker.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from airflow.decorators import dag, task
@@ -25,6 +26,7 @@ DEFAULT_ARGS = {
     "execution_timeout": timedelta(minutes=30),
 }
 START = datetime(2025, 1, 1)
+log = logging.getLogger(__name__)
 
 
 def _ctx():
@@ -122,7 +124,11 @@ def train_daily():
         from cryptosent.pipeline import backfill_news
 
         settings, store = _ctx()
-        return backfill_news(settings, store, days=2)
+        try:
+            return backfill_news(settings, store, days=2)
+        except Exception:  # noqa: BLE001 - a news API outage must not block retraining
+            log.exception("Recent news backfill failed; training on the news already stored")
+            return 0
 
     @task
     def score(_: int) -> int:

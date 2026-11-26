@@ -16,7 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("crawl", help="run the live news collectors once")
-    p = sub.add_parser("backfill-news", help="load historical news from CryptoCompare")
+    p = sub.add_parser("backfill-news", help="load historical news (GDELT, plus CryptoCompare with a key)")
     p.add_argument("--days", type=int, default=90)
     p = sub.add_parser("prices", help="sync Binance 1m candles")
     p.add_argument("--backfill-days", type=int, default=None)

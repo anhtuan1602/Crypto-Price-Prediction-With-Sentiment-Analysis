@@ -11,7 +11,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from .collectors import BinancePriceCollector, CryptoCompareCollector, PoliteSession, build_news_collectors, dedupe
+from .collectors import BinancePriceCollector, build_backfill_collectors, build_news_collectors, dedupe
 from .config import Settings
 from .features import TARGET, build_dataset
 from .models.train import ExperimentConfig, fit_final, log_mlflow, run_experiment, save_outputs
@@ -54,12 +54,28 @@ def crawl_news(settings: Settings, store: Store, publish: bool = True) -> dict[s
 
 
 def backfill_news(settings: Settings, store: Store, days: int) -> int:
-    session = PoliteSession(proxies=settings.http_proxies, timeout=settings.request_timeout)
-    collector = CryptoCompareCollector(session=session, api_key=settings.cryptocompare_api_key)
+    """Load ``days`` of historical news from every configured backfill source.
+    One failing source is logged and skipped; if all fail, the error is raised
+    so the Airflow task shows it."""
+    collectors = build_backfill_collectors(settings)
+    if not collectors:
+        raise ValueError("No news backfill source configured (NEWS_BACKFILL_SOURCES)")
     start = datetime.now(timezone.utc) - timedelta(days=days)
-    articles = collector.backfill(start)
-    stored = store.upsert_articles(articles)
-    log.info("backfill_news: %d articles fetched for %d days, %d new", len(articles), days, stored)
+    stored = 0
+    errors: list[Exception] = []
+    for collector in collectors:
+        try:
+            articles = collector.backfill(start)
+        except Exception as exc:  # noqa: BLE001 - try the other sources
+            log.error("backfill_news: %s failed: %s", collector.name, exc)
+            errors.append(exc)
+            continue
+        new = store.upsert_articles(articles)
+        stored += new
+        log.info("backfill_news: %s fetched %d articles for %d days, %d new",
+                 collector.name, len(articles), days, new)
+    if len(errors) == len(collectors):
+        raise errors[0]
     return stored
 
 

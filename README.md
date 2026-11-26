@@ -9,7 +9,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 ```
  CoinMarketCap ─┐                                    ┌─> MongoDB (articles, sentiment, nlp)
  RSS feeds ─────┼─ Airflow cmc_news_10m ─> Kafka ────┤
- CryptoCompare ─┘   (crawl, clean, dedup)  news.raw   └─ sentiment-consumer (Gemini + NLP) ─> news.scored
+ GDELT history ─┘   (crawl, clean, dedup)  news.raw   └─ sentiment-consumer (Gemini + NLP) ─> news.scored
  Binance 1m ────── Airflow btc_prices_5m ─────────────> MongoDB (prices)
                    Airflow train_daily ─> leakage-safe dataset ─> walk-forward eval ─> MLflow + model
                    Airflow predict_10m ─> predictions ─> FastAPI ─> dashboard
@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 63 tests
+pytest                         # 67 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
@@ -42,10 +42,8 @@ docker compose up -d --build
 | Airflow | http://localhost:8080 (user and password from `.env`) |
 | MLflow | http://localhost:5000 |
 
-Put a free CryptoCompare / CoinDesk Data API key in `CRYPTOCOMPARE_API_KEY`
-first: the news API needs one for history. Then, once, trigger the
-**`backfill_history`** DAG in Airflow (default 90 days).
-It loads 1-minute Binance candles and historical CryptoCompare news, then
+Then, once, trigger the **`backfill_history`** DAG in Airflow (default 90 days).
+It loads 1-minute Binance candles and historical news from GDELT (see below), then
 scores them. After that the scheduled DAGs keep everything current:
 
 | DAG | Schedule | What it does |
@@ -56,6 +54,25 @@ scores them. After that the scheduled DAGs keep everything current:
 | `sentiment_catchup_1h` | hourly | score anything the Kafka consumer missed, upgrade some lexicon scores to Gemini |
 | `train_daily` | 02:00 UTC | backfill 2 days of news, retrain on the last 180 days, log to MLflow |
 | `backfill_history` | manual | initial history load |
+
+### Historical news (backfill)
+
+* **GDELT** (default, free, no key) searches news from about the **last 3
+  months** only. It returns headlines and links but no article text, so
+  those articles are scored on the title. Its timestamp is when GDELT first
+  saw the article, usually 15 to 60 minutes after publication. That delay
+  can only make news late, never early, so it cannot leak future data. GDELT
+  allows about one request every 5 seconds, so a 90-day backfill takes
+  roughly an hour. Titles are filtered for crypto terms.
+* **CryptoCompare** (CoinDesk Data) has article text and a longer history,
+  but its free tier ended in May 2026. It is used only when
+  `CRYPTOCOMPARE_API_KEY` is set.
+* For more than 3 months of history you need a paid source or GDELT's raw
+  GKG files (large downloads, not supported here). Over 3 months the model
+  still sees thousands of headlines, which is enough to compare news against
+  price-only features.
+* If one source fails, the others still run, and the log names the source
+  and its error.
 
 ### Gemini on the free tier
 
@@ -124,7 +141,7 @@ Results go to `artifacts/report.md`, `report.json`, `test_predictions.csv`,
 | Report | Here | Why |
 |---|---|---|
 | CoinGecko prices | Binance 1m klines | CoinGecko's free API has no 1-minute history |
-| CoinMarketCap only, 20 days | + RSS + CryptoCompare backfill | months of history and redundancy |
+| CoinMarketCap only, 20 days | + RSS + GDELT backfill (CryptoCompare with a key) | months of history and redundancy |
 | Prompt returns label + confidence | label + **score in [-1, 1]** + confidence + reasoning (JSON schema) | the S_market and std/min/max features need a score |
 | Lag described but audit only checked `article < window end` | lag enforced in code, audited on every row, unit tested | prevents same-window correlation counted as prediction |
 | Scaler / noise / correlation filter | fitted inside each training fold | no test statistics leak into training |
@@ -143,7 +160,7 @@ are usually easier to detect over an hour than over 10 minutes.
 
 ```
 src/cryptosent/
-  collectors/   coinmarketcap.py, rss.py, cryptocompare.py, prices.py (Binance), news_base.py
+  collectors/   coinmarketcap.py, rss.py, gdelt.py, cryptocompare.py, prices.py (Binance), news_base.py
   sentiment/    prompt.py, gemini.py, lexicon.py (offline), finbert.py (optional), nlp_features.py
   features/     technical.py, sentiment_agg.py, dataset.py (leakage-safe builder + audit)
   models/       registry.py, train.py (protocol), evaluate.py (metrics + backtest), baselines.py
