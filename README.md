@@ -21,7 +21,7 @@ defend (see [What changed from the report](#what-changed-from-the-report)).
 pip install -e ".[dev]"
 cryptosent demo --days 30      # synthetic prices + news, full train/eval
 cryptosent serve               # dashboard on http://localhost:8000
-pytest                         # 73 tests
+pytest                         # 76 tests
 ```
 
 The demo plants a small, delayed news effect in a random-walk price series.
@@ -64,14 +64,21 @@ The scheduled DAGs keep everything current:
 ### Live news sources (no keys)
 
 * **CoinMarketCap**: the site's news content endpoint, with an HTML fallback.
-* **RSS** from 13 crypto outlets: CoinDesk, Cointelegraph, Decrypt, Bitcoin
-  Magazine, The Block, Bitcoinist, NewsBTC, CryptoSlate, CryptoPotato,
-  Bitcoin.com, U.Today, Cryptonews and BeInCrypto.
+* **RSS** from 31 crypto outlets (see `DEFAULT_FEEDS` in
+  `collectors/rss.py`). Add your own with
+  `RSS_FEEDS_EXTRA=name=https://site/feed,...` and switch feeds off with
+  `RSS_FEEDS_DISABLED=name,...`.
+* `cryptosent sources` fetches every source once and prints a table: HTTP
+  status, feed entries, articles kept and the newest article. It shows any
+  feed that is blocked or has moved.
+* `cryptosent stats --hours 24` shows how many articles were collected per
+  publisher and per day, and how many were scored by each backend.
 * When a feed has only a teaser, the article page is downloaded **once** for
   each new article and the main text is extracted (`FETCH_FULL_TEXT=true`,
   at most 60 pages per run). A broken feed or a blocked page is skipped.
-* Expect roughly 300 to 600 BTC and crypto articles a day. This is an
-  estimate; the `crawl_news` log line shows the real counts per source.
+* Volume follows US and EU working hours. Overnight in UTC (roughly 22:00
+  to 06:00) adds only a trickle, so judge volume over a full day with
+  `cryptosent stats`.
 
 ### Historical news (optional backfill)
 

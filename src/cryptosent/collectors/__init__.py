@@ -6,7 +6,7 @@ from .cryptocompare import CryptoCompareCollector
 from .gdelt import GdeltCollector
 from .news_base import Article, PoliteSession, article_hash, clean_text, dedupe, fetch_full_text, to_utc
 from .prices import BinancePriceCollector
-from .rss import RSSCollector
+from .rss import RSSCollector, feeds_from_settings
 
 __all__ = [
     "Article", "PoliteSession", "article_hash", "clean_text", "dedupe", "fetch_full_text", "to_utc",
@@ -19,7 +19,8 @@ def build_news_collectors(settings) -> list:
     session = PoliteSession(proxies=settings.http_proxies, timeout=settings.request_timeout)
     registry = {
         "coinmarketcap": lambda: CoinMarketCapCrawler(session=session, fetch_bodies=False),  # see crawl_news
-        "rss": lambda: RSSCollector(session=session),
+        "rss": lambda: RSSCollector(
+            session=session, feeds=feeds_from_settings(settings.rss_feeds_extra, settings.rss_feeds_disabled)),
         "cryptocompare": lambda: CryptoCompareCollector(session=session, api_key=settings.cryptocompare_api_key),
         "gdelt": lambda: GdeltCollector(session=session),
     }

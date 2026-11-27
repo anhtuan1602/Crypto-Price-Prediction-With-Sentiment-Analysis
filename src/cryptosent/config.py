@@ -92,6 +92,9 @@ class Settings:
     news_backfill_sources: list[str] = field(
         default_factory=lambda: _env_list("NEWS_BACKFILL_SOURCES", ["gdelt", "cryptocompare"])
     )
+    # extra feeds as "name=https://...,name2=https://..." and feed names to switch off
+    rss_feeds_extra: list[str] = field(default_factory=lambda: _env_list("RSS_FEEDS_EXTRA", []))
+    rss_feeds_disabled: list[str] = field(default_factory=lambda: _env_list("RSS_FEEDS_DISABLED", []))
     # download the article page once for new articles whose feed only has a teaser
     fetch_full_text: bool = field(default_factory=lambda: _env_bool("FETCH_FULL_TEXT", True))
     cryptocompare_api_key: str | None = field(default_factory=lambda: _env("CRYPTOCOMPARE_API_KEY"))

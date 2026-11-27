@@ -289,3 +289,67 @@ def test_fetch_full_text_replaces_teasers_once():
     assert fetch_full_text(Session(), [teaser, full]) == 1
     assert teaser.body.startswith("Bitcoin rose sharply") and "menu" not in teaser.body and "footer" not in teaser.body
     assert teaser.extra["full_text"] is True and Session.calls == 1
+
+
+RSS_OK = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>x</title>
+<item><title>Bitcoin climbs past resistance</title><link>https://n/a</link>
+<pubDate>Thu, 26 Nov 2026 10:00:00 GMT</pubDate><description>Cryptocurrency markets rally</description></item>
+<item><title>Cooking tips</title><link>https://n/b</link>
+<pubDate>Thu, 26 Nov 2026 10:00:00 GMT</pubDate><description>pasta</description></item>
+</channel></rss>"""
+
+
+def test_rss_check_feed_reports_blocked_and_broken_feeds(caplog):
+    import logging
+
+    from cryptosent.collectors.rss import RSSCollector
+
+    class R:
+        def __init__(self, status, content):
+            self.status_code, self.content, self.text = status, content, content.decode()
+
+    answers = {"https://ok": R(200, RSS_OK), "https://blocked": R(403, b"denied"),
+               "https://challenge": R(200, b"<html><body>Just a moment...</body></html>")}
+
+    class S:
+        def get(self, url, headers=None, return_errors=False):
+            return answers.get(url)
+
+    feeds = {"ok": "https://ok", "blocked": "https://blocked", "challenge": "https://challenge", "down": "https://down"}
+    rss = RSSCollector(session=S(), feeds=feeds)
+    arts, rep = rss.check_feed("ok", "https://ok")
+    assert rep == {"url": "https://ok", "status": 200, "entries": 2, "kept": 1, "error": None} and len(arts) == 1
+    assert rss.check_feed("blocked", "https://blocked")[1]["error"] == "HTTP 403"
+    assert "not a feed" in rss.check_feed("challenge", "https://challenge")[1]["error"]
+    with caplog.at_level(logging.INFO):
+        assert len(rss.crawl()) == 1
+    assert "from 1/4 feeds" in caplog.text and "blocked (HTTP 403)" in caplog.text and "down (no response" in caplog.text
+
+
+def test_feeds_from_settings_adds_and_disables():
+    from cryptosent.collectors.rss import DEFAULT_FEEDS, feeds_from_settings
+
+    feeds = feeds_from_settings(["mysite=https://my.site/feed", "broken"], ["coindesk"])
+    assert feeds["mysite"] == "https://my.site/feed" and "coindesk" not in feeds and "broken" not in feeds
+    assert len(feeds) == len(DEFAULT_FEEDS)
+    assert len(DEFAULT_FEEDS) >= 30
+
+
+def test_article_stats_counts_recent_collection(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from cryptosent.collectors.news_base import Article
+    from cryptosent.pipeline import article_stats
+    from cryptosent.storage import LocalStore
+
+    now = datetime.now(timezone.utc)
+    old = Article("https://n/old", "Bitcoin old", now - timedelta(days=3), "rss", publisher="decrypt")
+    old.fetched_at = now - timedelta(days=3)
+    new = [Article(f"https://n/{i}", "Bitcoin up", now - timedelta(hours=1), "rss", publisher="newsbtc")
+           for i in range(3)]
+    store = LocalStore(tmp_path)
+    store.upsert_articles([old, *new])
+    stats = article_stats(store, hours=24)
+    assert stats["total"] == 4 and stats["collected_last_24h"] == 3
+    assert stats["per_publisher_last_24h"] == {"newsbtc": 3} and stats["scored_by"] == {"unscored": 4}
+    assert sum(stats["per_day_utc"].values()) == 4

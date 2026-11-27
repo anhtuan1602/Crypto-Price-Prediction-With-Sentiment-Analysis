@@ -30,6 +30,51 @@ PROGRESS_EVERY = 50  # articles between progress log lines
 
 
 # -- collection -----------------------------------------------------------
+def check_sources(settings: Settings) -> list[dict[str, Any]]:
+    """Fetch every live source once and report what it returns (no writes)."""
+    from .collectors import CoinMarketCapCrawler, RSSCollector, feeds_from_settings
+
+    session = PoliteSession(proxies=settings.http_proxies, timeout=settings.request_timeout, retries=1)
+    rows: list[dict[str, Any]] = []
+    if "coinmarketcap" in settings.news_sources:
+        cmc = CoinMarketCapCrawler(session=session, fetch_bodies=False)
+        api = cmc.fetch_api()
+        html = [] if api else cmc.fetch_html()
+        arts = api or html
+        rows.append({"source": "coinmarketcap", "status": "api" if api else "html" if html else "-",
+                     "entries": len(arts), "kept": len(arts),
+                     "newest": max((a.published_at for a in arts), default=None),
+                     "error": None if arts else "no articles from the content API or the HTML page"})
+    if "rss" in settings.news_sources:
+        rss = RSSCollector(session=session,
+                           feeds=feeds_from_settings(settings.rss_feeds_extra, settings.rss_feeds_disabled))
+        for name, url in rss.feeds.items():
+            arts, rep = rss.check_feed(name, url)
+            rows.append({"source": name, "status": rep["status"], "entries": rep["entries"], "kept": rep["kept"],
+                         "newest": max((a.published_at for a in arts), default=None), "error": rep["error"]})
+    return rows
+
+
+def article_stats(store: Store, hours: int = 24) -> dict[str, Any]:
+    """Counts of articles collected in the last ``hours`` (by fetched_at), per
+    publisher and per day, plus scoring status."""
+    df = store.get_articles()
+    if df.empty:
+        return {"total": 0}
+    fetched = pd.to_datetime(df.get("fetched_at"), utc=True)
+    df = df.assign(fetched_at=fetched.fillna(df["published_at"]))
+    since = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
+    recent = df[df["fetched_at"] >= since]
+    backend = df.get("sentiment_backend")
+    per_day = df[df["fetched_at"] >= pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=7)]
+    return {
+        "total": len(df),
+        f"collected_last_{hours}h": len(recent),
+        f"per_publisher_last_{hours}h": recent["publisher"].fillna(recent["source"]).value_counts().to_dict(),
+        "per_day_utc": per_day["fetched_at"].dt.strftime("%Y-%m-%d").value_counts().sort_index().to_dict(),
+        "scored_by": backend.fillna("unscored").value_counts().to_dict() if backend is not None else {},
+    }
+
 def crawl_news(settings: Settings, store: Store, publish: bool = True) -> dict[str, int]:
     """Run all live news collectors once. New articles go to MongoDB and, when
     Kafka is configured, to the raw topic for the sentiment consumer."""
