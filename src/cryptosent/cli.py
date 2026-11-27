@@ -16,6 +16,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("crawl", help="run the live news collectors once")
+    sub.add_parser("sources", help="check every live news source once (no writes)")
+    p = sub.add_parser("stats", help="article counts per source and per day, and scoring status")
+    p.add_argument("--hours", type=int, default=24)
     p = sub.add_parser("backfill-news", help="load historical news (GDELT, plus CryptoCompare with a key)")
     p.add_argument("--days", type=int, default=90)
     p = sub.add_parser("prices", help="sync Binance 1m candles")
@@ -56,8 +59,21 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import pipeline
 
+    if args.command == "sources":
+        rows = pipeline.check_sources(settings)
+        print(f"{'source':<16} {'status':>6} {'entries':>7} {'kept':>5}  {'newest (UTC)':<17} problem")
+        for r in rows:
+            newest = r["newest"].strftime("%Y-%m-%d %H:%M") if r["newest"] else "-"
+            print(f"{r['source']:<16} {str(r['status'] or '-'):>6} {r['entries']:>7} {r['kept']:>5}  "
+                  f"{newest:<17} {r['error'] or ''}")
+        ok = sum(1 for r in rows if r["kept"])
+        print(f"\n{ok}/{len(rows)} sources returned articles, {sum(r['kept'] for r in rows)} articles in total")
+        return 0
+
     store = get_store(settings)
-    if args.command == "crawl":
+    if args.command == "stats":
+        result = pipeline.article_stats(store, args.hours)
+    elif args.command == "crawl":
         result = pipeline.crawl_news(settings, store)
     elif args.command == "backfill-news":
         result = {"new_articles": pipeline.backfill_news(settings, store, args.days)}
