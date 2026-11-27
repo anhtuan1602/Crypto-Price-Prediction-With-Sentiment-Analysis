@@ -32,20 +32,18 @@ DEFAULT_FEEDS = {
     "cryptobriefing": "https://cryptobriefing.com/feed/",
     "coingape": "https://coingape.com/feed/",
     "crypto.news": "https://crypto.news/feed/",
-    "thecryptobasic": "https://thecryptobasic.com/feed/",
     "zycrypto": "https://zycrypto.com/feed/",
     "coinpedia": "https://coinpedia.org/feed/",
     "dailyhodl": "https://dailyhodl.com/feed/",
-    "coinjournal": "https://coinjournal.net/feed/",
     "coinspeaker": "https://www.coinspeaker.com/feed/",
     "cryptodaily": "https://cryptodaily.co.uk/feed",
     "coinedition": "https://coinedition.com/feed/",
     "finbold": "https://finbold.com/feed/",
     "bitcoinworld": "https://bitcoinworld.co.in/feed/",
     "crypto-economy": "https://crypto-economy.com/feed/",
-    "investing.com": "https://www.investing.com/rss/news_301.rss",
-    # replacements for feeds that answered Cloudflare 403 from GP's machine (2026-11-27):
-    # ambcrypto, coincentral, blockonomi
+    # replacements for feeds that failed from GP's machine on 2026-11-27: ambcrypto,
+    # coincentral, blockonomi (Cloudflare 403), thecryptobasic (not a feed),
+    # coinjournal (502), investing.com (TLS reset)
     "cryptopolitan": "https://www.cryptopolitan.com/feed/",
     "thenewscrypto": "https://thenewscrypto.com/feed/",
     "timestabloid": "https://timestabloid.com/feed/",

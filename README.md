@@ -64,7 +64,7 @@ The scheduled DAGs keep everything current:
 ### Live news sources (no keys)
 
 * **CoinMarketCap**: the site's news content endpoint, with an HTML fallback.
-* **RSS** from 33 crypto outlets (see `DEFAULT_FEEDS` in
+* **RSS** from 30 crypto outlets (see `DEFAULT_FEEDS` in
   `collectors/rss.py`). Add your own with
   `RSS_FEEDS_EXTRA=name=https://site/feed,...` and switch feeds off with
   `RSS_FEEDS_DISABLED=name,...`.
