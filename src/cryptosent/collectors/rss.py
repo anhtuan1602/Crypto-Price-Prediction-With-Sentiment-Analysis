@@ -30,7 +30,6 @@ DEFAULT_FEEDS = {
     "beincrypto": "https://beincrypto.com/feed/",
     # more keyless crypto news feeds (2026-11); dead or blocked feeds are skipped
     "cryptobriefing": "https://cryptobriefing.com/feed/",
-    "ambcrypto": "https://ambcrypto.com/feed/",
     "coingape": "https://coingape.com/feed/",
     "crypto.news": "https://crypto.news/feed/",
     "thecryptobasic": "https://thecryptobasic.com/feed/",
@@ -42,11 +41,16 @@ DEFAULT_FEEDS = {
     "cryptodaily": "https://cryptodaily.co.uk/feed",
     "coinedition": "https://coinedition.com/feed/",
     "finbold": "https://finbold.com/feed/",
-    "coincentral": "https://coincentral.com/feed/",
-    "blockonomi": "https://blockonomi.com/feed/",
     "bitcoinworld": "https://bitcoinworld.co.in/feed/",
     "crypto-economy": "https://crypto-economy.com/feed/",
     "investing.com": "https://www.investing.com/rss/news_301.rss",
+    # replacements for feeds that answered Cloudflare 403 from GP's machine (2026-11-27):
+    # ambcrypto, coincentral, blockonomi
+    "cryptopolitan": "https://www.cryptopolitan.com/feed/",
+    "thenewscrypto": "https://thenewscrypto.com/feed/",
+    "timestabloid": "https://timestabloid.com/feed/",
+    "cryptoglobe": "https://www.cryptoglobe.com/latest/feed/",
+    "bitcoinethereumnews": "https://bitcoinethereumnews.com/feed/",
 }
 
 # market-moving crypto news; every feed above is crypto-focused, this only drops off-topic posts
