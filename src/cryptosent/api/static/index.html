@@ -73,8 +73,6 @@
   <section class="panel side"><h2>Feature-set ablation</h2><div class="scroll-x"><table id="ablation"></table></div>
     <div class="note">Same model, split and settings; only the feature groups change.</div></section>
 
-  <section class="panel full"><h2>Backtest on held-out period</h2><div class="scroll-x"><table id="backtest"></table></div>
-    <div class="note">Long/short over each prediction window, fees charged per side, non-overlapping trades.</div></section>
 </main>
 <script>
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -158,9 +156,6 @@ async function refresh() {
       .concat(Object.entries(model.test_baselines || {}).map(([k, v]) => ["baseline: " + k, v]));
     document.getElementById("ablation").innerHTML = `<thead><tr><th>Features</th><th class="num">MAE</th><th class="num">R²</th><th class="num">Dir.</th></tr></thead><tbody>` +
       rows.map(([k, m]) => `<tr><td>${esc(k.replaceAll("_", " "))}</td><td class="num">${fmt(m.mae, 3)}</td><td class="num">${fmt(m.r2, 3)}</td><td class="num">${fmt(m.direction_accuracy * 100, 1)}%</td></tr>`).join("") + "</tbody>";
-    const bt = model.backtest || {};
-    document.getElementById("backtest").innerHTML = `<thead><tr><th>Variant</th><th class="num">Trades</th><th class="num">Return</th><th class="num">Win rate</th><th class="num">Sharpe</th><th class="num">Max DD</th><th class="num">Buy &amp; hold</th></tr></thead><tbody>` +
-      Object.entries(bt).map(([k, b]) => `<tr><td>${esc(k.replaceAll("_", " "))}</td><td class="num">${b.trades}</td><td class="num">${pct(b.total_return_pct, 2)}</td><td class="num">${b.win_rate === null ? "–" : fmt(b.win_rate * 100, 1) + "%"}</td><td class="num">${fmt(b.sharpe_annualised, 2)}</td><td class="num">${fmt(b.max_drawdown_pct, 2)}%</td><td class="num">${pct(b.buy_and_hold_pct, 2)}</td></tr>`).join("") + "</tbody>";
   }
 }
 refresh().catch(e => { document.getElementById("updated").textContent = "Could not load data: " + e.message; });
