@@ -3,18 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>BTC Sentiment Monitor</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
+  /* dark theme only */
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --border: #e4e7ec;
-    --accent: #2f6fed; --up: #12a150; --down: #d92d20; --warn: #b54708; --neutral: #667085;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1218; --panel: #171b24; --text: #e6e9ef; --muted: #98a2b3; --border: #2a3140;
-      --accent: #6b9bff; --up: #3ccf7a; --down: #ff6b5e; --warn: #f5a524; --neutral: #98a2b3;
-    }
+    color-scheme: dark;
+    --bg: #050608; --panel: #101216; --text: #e8eaee; --muted: #8b93a1; --border: #22262e;
+    --accent: #5b8cff; --up: #34d17a; --down: #ff5f57; --warn: #f5a524; --neutral: #8b93a1;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -73,8 +70,6 @@
   <section class="panel side"><h2>Feature-set ablation</h2><div class="scroll-x"><table id="ablation"></table></div>
     <div class="note">Same model, split and settings; only the feature groups change.</div></section>
 
-  <section class="panel full"><h2>Backtest on held-out period</h2><div class="scroll-x"><table id="backtest"></table></div>
-    <div class="note">Long/short over each prediction window, fees charged per side, non-overlapping trades.</div></section>
 </main>
 <script>
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -158,9 +153,6 @@ async function refresh() {
       .concat(Object.entries(model.test_baselines || {}).map(([k, v]) => ["baseline: " + k, v]));
     document.getElementById("ablation").innerHTML = `<thead><tr><th>Features</th><th class="num">MAE</th><th class="num">R²</th><th class="num">Dir.</th></tr></thead><tbody>` +
       rows.map(([k, m]) => `<tr><td>${esc(k.replaceAll("_", " "))}</td><td class="num">${fmt(m.mae, 3)}</td><td class="num">${fmt(m.r2, 3)}</td><td class="num">${fmt(m.direction_accuracy * 100, 1)}%</td></tr>`).join("") + "</tbody>";
-    const bt = model.backtest || {};
-    document.getElementById("backtest").innerHTML = `<thead><tr><th>Variant</th><th class="num">Trades</th><th class="num">Return</th><th class="num">Win rate</th><th class="num">Sharpe</th><th class="num">Max DD</th><th class="num">Buy &amp; hold</th></tr></thead><tbody>` +
-      Object.entries(bt).map(([k, b]) => `<tr><td>${esc(k.replaceAll("_", " "))}</td><td class="num">${b.trades}</td><td class="num">${pct(b.total_return_pct, 2)}</td><td class="num">${b.win_rate === null ? "–" : fmt(b.win_rate * 100, 1) + "%"}</td><td class="num">${fmt(b.sharpe_annualised, 2)}</td><td class="num">${fmt(b.max_drawdown_pct, 2)}%</td><td class="num">${pct(b.buy_and_hold_pct, 2)}</td></tr>`).join("") + "</tbody>";
   }
 }
 refresh().catch(e => { document.getElementById("updated").textContent = "Could not load data: " + e.message; });
